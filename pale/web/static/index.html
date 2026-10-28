@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PALE // Unit Terminal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/pale.css">
+</head>
+<body>
+<div class="grain"></div>
+<div class="dust" aria-hidden="true"></div>
+
+<div id="boot" class="boot">
+  <pre id="bootText"></pre>
+</div>
+
+<header class="top">
+  <div class="brand"><span class="sq"></span>PALE <span class="dim">//</span> UNIT <span id="unitName">P-0</span></div>
+  <div class="chips">
+    <label class="chip">MODE
+      <select id="mode">
+        <option value="observe">OBSERVE</option>
+        <option value="ask">ASK</option>
+        <option value="edits">EDITS</option>
+        <option value="autonomous">AUTONOMOUS</option>
+      </select>
+    </label>
+    <button class="chip toggle" id="dry" aria-pressed="false">DRY RUN <b>OFF</b></button>
+    <span class="chip">STEP <b id="step">0</b></span>
+    <span class="chip">COST <b id="cost">$0.0000</b></span>
+    <span class="chip">TODAY <b id="today">$0.00</b></span>
+  </div>
+  <div class="session dim" id="sessionId">—</div>
+</header>
+
+<div class="frame">
+  <nav class="menu" id="menu">
+    <div class="menu-title">MENU</div>
+    <button data-tab="directive" class="active"><span class="sq"></span>Directive</button>
+    <button data-tab="archive"><span class="sq"></span>Archive</button>
+    <button data-tab="memory"><span class="sq"></span>Memory</button>
+    <button data-tab="skills"><span class="sq"></span>Skills</button>
+    <button data-tab="schedule"><span class="sq"></span>Schedule</button>
+    <button data-tab="blackbox"><span class="sq"></span>Black Box</button>
+    <div class="menu-foot dim" id="flavor"></div>
+  </nav>
+
+  <main>
+    <!-- DIRECTIVE -->
+    <section class="tab active" id="tab-directive">
+      <div class="split">
+        <div class="panel log-panel">
+          <div class="panel-head"><span>TRANSMISSION LOG</span><span class="dim" id="statusLine">standing by</span></div>
+          <div class="log" id="log"></div>
+          <form class="input" id="form">
+            <span class="prompt">OPERATOR ›</span>
+            <textarea id="text" rows="2" placeholder="Issue a directive. Enter to transmit, Shift+Enter for a new line."></textarea>
+            <div class="input-btns">
+              <button type="submit" class="btn primary">TRANSMIT</button>
+              <button type="button" class="btn danger" id="halt">HALT</button>
+              <button type="button" class="btn" id="undo" title="Roll back the last directive's file changes">UNDO</button>
+            </div>
+          </form>
+        </div>
+        <aside class="side">
+          <div class="panel">
+            <div class="panel-head"><span>PLAN</span></div>
+            <ul class="plan" id="plan"><li class="dim">no plan filed</li></ul>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><span>UNIT STATUS</span></div>
+            <dl class="stats">
+              <dt>Model</dt><dd id="model">—</dd>
+              <dt>Sandbox</dt><dd id="sandbox" class="wrap">—</dd>
+              <dt>Budget</dt><dd id="budget">—</dd>
+              <dt>Tokens</dt><dd id="tokens">0 in · 0 out</dd>
+            </dl>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section class="tab" id="tab-archive">
+      <div class="panel"><div class="panel-head"><span>ARCHIVE // SESSIONS</span><button class="btn small" id="newSession">NEW SESSION</button></div>
+        <div class="list" id="sessions"></div></div>
+    </section>
+
+    <section class="tab" id="tab-memory">
+      <div class="panel"><div class="panel-head"><span>MEMORY BANKS</span></div><div class="list" id="memory"></div></div>
+    </section>
+
+    <section class="tab" id="tab-skills">
+      <div class="panel"><div class="panel-head"><span>SKILLS</span><span class="dim">quarantined skills stay inert until you authorize them</span></div>
+        <div class="list" id="skills"></div></div>
+    </section>
+
+    <section class="tab" id="tab-schedule">
+      <div class="panel"><div class="panel-head"><span>SCHEDULED DIRECTIVES</span></div>
+        <form class="sched-form" id="schedForm">
+          <input id="schedSpec" placeholder="every 30m · daily 09:00 · weekdays 08:30 · once 2026-11-01 09:00" required>
+          <input id="schedText" placeholder="directive" required>
+          <button class="btn primary">SCHEDULE</button>
+        </form>
+        <p class="note dim">Unattended runs cannot do anything that needs authorization. Reports are written to bunker/reports/.</p>
+        <div class="list" id="schedule"></div></div>
+    </section>
+
+    <section class="tab" id="tab-blackbox">
+      <div class="panel"><div class="panel-head"><span>BLACK BOX</span><span id="chain"></span></div><div class="list mono" id="audit"></div></div>
+    </section>
+  </main>
+</div>
+
+<div class="modal" id="approval" hidden>
+  <div class="dialog">
+    <div class="dialog-head"><span class="sq"></span>AUTHORIZATION REQUIRED <span class="risk" id="apRisk"></span></div>
+    <div class="dialog-body">
+      <div class="ap-summary" id="apSummary"></div>
+      <div class="ap-reasons dim" id="apReasons"></div>
+      <pre class="preview" id="apPreview"></pre>
+      <input id="apNote" placeholder="optional message to the unit (sent if you deny)">
+    </div>
+    <div class="dialog-foot">
+      <button class="btn primary" id="apYes">AUTHORIZE</button>
+      <button class="btn" id="apAlways">ALWAYS THIS SESSION</button>
+      <button class="btn danger" id="apNo">DENY</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="question" hidden>
+  <div class="dialog">
+    <div class="dialog-head"><span class="sq"></span>UNIT REQUESTS INPUT</div>
+    <div class="dialog-body"><p id="qText"></p><textarea id="qAnswer" rows="3"></textarea></div>
+    <div class="dialog-foot"><button class="btn primary" id="qSend">REPLY</button></div>
+  </div>
+</div>
+
+<script src="/static/pale.js"></script>
+</body>
+</html>
