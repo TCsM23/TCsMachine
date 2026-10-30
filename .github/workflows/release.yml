@@ -1,0 +1,107 @@
+# Builds and publishes a release whenever main carries a version that has no release yet.
+# To ship an update: bump __version__ in pale/__init__.py, add a CHANGELOG.md entry, push.
+# Installed apps see the new release on their next check and ask the operator to update.
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      release: ${{ steps.check.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: echo "version=$(python3 -c 'import re;print(re.search(r"__version__ = \"([^\"]+)\"", open("pale/__init__.py").read())[1])')" >> "$GITHUB_OUTPUT"
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v${{ steps.v.outputs.version }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release=false" >> "$GITHUB_OUTPUT"; echo "v${{ steps.v.outputs.version }} already released"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"; echo "will release v${{ steps.v.outputs.version }}"
+          fi
+
+  test:
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+
+  windows:
+    needs: [plan, test]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[desktop,build]"
+      - run: pyinstaller packaging/pale.spec --noconfirm
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
+          & $iscc "/DAppVersion=${{ needs.plan.outputs.version }}" packaging\windows\pale.iss
+      - uses: actions/upload-artifact@v4
+        with: { name: windows, path: "dist/PALE-Setup-*.exe" }
+
+  macos:
+    needs: [plan, test]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[desktop,build]"
+      - run: pyinstaller packaging/pale.spec --noconfirm
+      - run: ditto -c -k --keepParent dist/PALE.app "dist/PALE-${{ needs.plan.outputs.version }}-macos.zip"
+      - uses: actions/upload-artifact@v4
+        with: { name: macos, path: "dist/PALE-*-macos.zip" }
+
+  linux:
+    needs: [plan, test]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[desktop,build]"
+      - run: pyinstaller packaging/pale.spec --noconfirm
+      - run: tar -C dist -czf "dist/PALE-${{ needs.plan.outputs.version }}-linux.tar.gz" PALE
+      - uses: actions/upload-artifact@v4
+        with: { name: linux, path: "dist/PALE-*-linux.tar.gz" }
+
+  publish:
+    needs: [plan, windows, macos, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: out, merge-multiple: true }
+      - name: Checksums
+        run: cd out && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Release notes from CHANGELOG.md
+        run: python3 packaging/release_notes.py "${{ needs.plan.outputs.version }}" > notes.md
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "v${{ needs.plan.outputs.version }}" out/* --title "PALE v${{ needs.plan.outputs.version }}" --notes-file notes.md --target "$GITHUB_SHA"

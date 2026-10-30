@@ -20,6 +20,10 @@ ADAPTIVE_MODELS = {
 }
 FALLBACK_MODELS = {"claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"}
 COMPACTION_MODELS = ADAPTIVE_MODELS
+WEB_SEARCH_MODELS = {
+    "claude-fable-5-1", "claude-fable-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7",
+    "claude-opus-4-6", "claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6",
+}
 
 
 @dataclass
@@ -39,15 +43,17 @@ class ModelClient(Protocol):
 
 
 def build_request(*, model: str, system: str, tools: list[dict], messages: list[dict], max_tokens: int,
-                  effort: str, compaction: bool, fallbacks: bool, cache: bool) -> dict:
+                  effort: str, compaction: bool, fallbacks: bool, cache: bool, web_search: int = 0) -> dict:
     req: dict = {
         "model": model,
         "max_tokens": max_tokens,
         "system": [{"type": "text", "text": system}],
-        "tools": [{**t, "eager_input_streaming": True} for t in tools],
+        "tools": [{**t, "eager_input_streaming": True} for t in tools],  # client tools only
         "messages": messages,
         "betas": [],
     }
+    if web_search and model in WEB_SEARCH_MODELS:
+        req["tools"].append({"type": "web_search_20260209", "name": "web_search", "max_uses": web_search})
     if model in ADAPTIVE_MODELS:
         req["thinking"] = {"type": "adaptive", "display": "summarized"}
         req["output_config"] = {"effort": effort}

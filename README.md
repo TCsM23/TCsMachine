@@ -19,7 +19,7 @@ The model never runs anything itself. It only asks to. The harness decides wheth
 ## Quick start
 
 ```bash
-pip install -e ".[web]"          # Python 3.11+
+pip install -e ".[web]"          # Python 3.11+  (or install the desktop app, below)
 export ANTHROPIC_API_KEY=sk-ant-...
 
 mkdir ~/units/first && cd ~/units/first
@@ -31,13 +31,51 @@ pale serve                        # web terminal on http://127.0.0.1:8642/?token
 
 > **Billing.** Claude API usage is billed separately from a Claude Pro or Max subscription. PALE stops at **$2 per session and $10 per day** by default (`budget_*` in `pale.toml`). For cheap experiments, set `model = "claude-haiku-5-5"`.
 
+## Desktop app
+
+PALE ships as a desktop app with its own window and desktop icon. On Windows you download `PALE-Setup-x.y.z.exe` from the latest GitHub release and run it. The Setup wizard installs PALE for your user only (no admin rights) and offers a desktop shortcut. On first launch a setup wizard asks for your API key, a sector folder, the unit's name, a model and a budget. The key goes into the OS keychain (Windows Credential Manager, macOS Keychain or Secret Service), not a plain file.
+
+![first-run wizard](docs/wizard-3.png)
+
+macOS and Linux builds are published as `.zip` and `.tar.gz`. You can also run it from source:
+
+```bash
+pip install -e ".[desktop]"
+pale desktop                      # or: pale-desktop
+```
+
+If the native window can't start (a Linux machine without GTK/WebKit, for example), PALE opens the same interface in your browser instead.
+
+### Updates
+
+The updater is part of the app; there is nothing else to install. Every six hours, and when you press **Check now** in Settings, PALE asks GitHub for the latest release of the update repo (`UPDATE_REPO` in `pale/__init__.py`). If that release is newer, an **UPDATE** chip lights up in the top bar and a toast appears. Clicking it shows the release notes, then:
+
+1. Downloads the installer for your platform.
+2. Verifies its SHA-256 against the release's `SHA256SUMS.txt`, and refuses to install if it's missing or doesn't match.
+3. On Windows, runs the installer silently, closes PALE and relaunches the new version. Your settings, keys and sectors are kept. On macOS and Linux it opens the release page.
+
+You can skip a version or turn automatic checks off in Settings. The update repo must be **public**, because the app reads releases without a token.
+
+### Publishing an update
+
+```bash
+python packaging/bump.py 0.3.0 "what changed"   # sets the version and opens a CHANGELOG entry
+# write the changes under "## 0.3.0" in CHANGELOG.md
+git commit -am "v0.3.0" && git push
+```
+
+On every push to `main`, `.github/workflows/release.yml` checks whether tag `v<version>` exists. If it doesn't, it runs the tests, builds Windows (PyInstaller + Inno Setup), macOS and Linux, writes `SHA256SUMS.txt`, and publishes release `v<version>` with the CHANGELOG section as its notes. Installed apps see it on their next check. Pushes that don't change the version build nothing.
+
+To build locally: `pip install -e ".[desktop,build]"`, `python packaging/make_icons.py`, `pyinstaller packaging/pale.spec`, then compile `packaging/windows/pale.iss` with Inno Setup 6.
+
 ## Surfaces
 
 | Command | What it is |
 |---|---|
+| `pale desktop` | The desktop app: native window, setup wizard, workspaces, updater. Also runs the scheduler. |
 | `pale chat` | Interactive terminal. Streams text and thinking summaries, shows diffs before approval, and stops the unit on ctrl-c. |
 | `pale run "directive"` | Runs one directive and exits. Without a TTY (or with `--no-input`), every approval request is denied. |
-| `pale serve` | Local web terminal: transcript, plan, approval dialogs with diffs, archive, memory, skills, schedule and black box. Also runs the scheduler. |
+| `pale serve` | The same interface as the desktop app, in your browser: transcript, plan, approvals with diffs, files, archive, memory, skills, schedule, ledger, black box and settings. Also runs the scheduler. |
 | `pale gateway` | Telegram bot. You approve actions with inline buttons, and only allow-listed user ids can talk to it. Also runs the scheduler. |
 | `pale daemon` | Runs the scheduler only. |
 
@@ -69,6 +107,12 @@ Most of the design comes from harnesses that already work well. The table shows 
 | Resumable sessions | `bunker/sessions/` | everyone |
 | Long-session handling | server-side compaction | Claude API compaction |
 | Prompt caching and refusal fallbacks | `model.py` | Claude API |
+| MCP servers (stdio) as extra tools | `mcp.py` | Claude Code, Cursor, Claude Desktop |
+| Git tools with approval on commit | `tools/git.py` | Aider auto-commits, Claude Code |
+| Image and file attachments | `agent.py` | Claude Code, Cursor |
+| Server-side web search (opt-in) | `model.py` | Claude API |
+| Command palette, multiple workspaces | web UI | VS Code, Cursor |
+| Self-updating desktop app | `desktop/` | Claude Desktop, VS Code |
 
 ### Less common features
 
@@ -82,6 +126,8 @@ These are things few harnesses ship, or ship only partially.
 6. **Unattended runs never escalate.** Scheduled runs use a deny-all approver, are capped at `edits` mode and lose the `ask_operator` tool. Anything that would need you is refused and noted in the report.
 7. **Dry run that shows the diff.** In dry-run mode, mutating tools return "would write X" with the actual unified diff, and "would run Y" with its risk score. Nothing changes on disk.
 8. **Network calls count as mutations.** `fetch_url` goes through the approval gate, because a URL can carry data out. Long query strings are flagged as high risk.
+9. **Untrusted MCP servers are gated.** Tools from an MCP server count as mutating, so they ask for approval and are logged in the black box, unless you mark that server `trusted = true`.
+10. **Verified self-update.** The updater refuses any download whose SHA-256 isn't listed in the release's checksum file.
 
 ## Safety model
 
@@ -114,7 +160,16 @@ pre_tool = ["python examples/hooks/no_secrets_in_writes.py"]
 
 [telegram]
 allowed_user_ids = [123456789]
+
+web_search = false              # true: let the unit search the web ($0.01 per search)
+
+[mcp.files]                     # any stdio MCP server
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "./sandbox"]
+trusted = false                 # false: its tools ask for approval
 ```
+
+Most of these can also be edited in the app's Settings screen, which validates the file before saving and keeps a `.bak`.
 
 Environment overrides: `PALE_MODEL`, `PALE_MODE`, `PALE_EFFORT`, `PALE_MAX_STEPS`, `PALE_BUDGET_SESSION_USD`, `PALE_BUDGET_DAILY_USD`.
 
@@ -133,7 +188,8 @@ pale/
   agent.py          the loop: step limit, budget, interrupts, tool gating, subagents
   model.py          Claude API client (beta stream: compaction, fallbacks, caching, effort)
   permissions.py    sandbox, risk scoring, allow/ask/deny policy
-  tools/            fs.py · shell.py · unit.py (memory, skills, todo, schedule, subagent, ask)
+  tools/            fs.py · shell.py · git.py · unit.py (memory, skills, todo, schedule, subagent, ask)
+  mcp.py            MCP stdio client; server tools become mcp__<server>__<tool>
   blackbox.py       hash-chained audit log
   redact.py         secret scrubbing
   checkpoints.py    undo
@@ -144,9 +200,11 @@ pale/
   runtime.py        shared wiring for all surfaces
   cli.py · theme.py terminal surface
   web/              FastAPI server + static UI
+  desktop/          native window, keychain store, workspaces, updater
   gateway/          Telegram
   testing.py        FakeModel for tests
-tests/              58 tests, no API key needed
+packaging/         icons, PyInstaller spec, Inno Setup wizard, release helpers
+tests/             77 tests, no API key needed
 ```
 
 ## Tests
@@ -156,7 +214,7 @@ pip install -e ".[dev]"
 pytest -q
 ```
 
-The tests drive the real loop with `pale.testing.FakeModel`, a scripted stand-in for Claude, so they cost nothing and still exercise real side effects in temporary folders. They cover sandbox escapes, approvals, dry runs, step limits, undo, redaction, the audit chain, budget stops, hooks, skill quarantine, the web socket flow and Telegram button approvals.
+The tests drive the real loop with `pale.testing.FakeModel`, a scripted stand-in for Claude, so they cost nothing and still exercise real side effects in temporary folders. They cover sandbox escapes, approvals, dry runs, step limits, undo, redaction, the audit chain, budget stops, hooks, skill quarantine, the web socket flow, Telegram button approvals, the updater against a fake GitHub, the desktop endpoints, attachments, MCP and git.
 
 ```python
 from pale.testing import FakeModel, call, say

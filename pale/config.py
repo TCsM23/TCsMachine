@@ -49,6 +49,16 @@ class TelegramConfig(BaseModel):
     allowed_user_ids: list[int] = Field(default_factory=list)
 
 
+class MCPServer(BaseModel):
+    """An MCP server launched over stdio. Its tools appear to the unit as mcp__<name>__<tool>."""
+
+    command: str
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    enabled: bool = True
+    trusted: bool = False  # true: its tools skip approval in ask mode (still logged, still gated by deny rules)
+
+
 class Settings(BaseModel):
     model: str = "claude-opus-5-5"
     sub_model: str = "claude-haiku-5-5"  # subagents and cheap side jobs
@@ -77,8 +87,12 @@ class Settings(BaseModel):
     unit_name: str = "P-0"
     persona: bool = True  # terse white-city unit voice; set false for a plain assistant
 
+    web_search: bool = False  # server-side web search tool ($10 per 1,000 searches, not approval-gated)
+    web_search_max_uses: int = 5
+
     hooks: HooksConfig = Field(default_factory=HooksConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
+    mcp: dict[str, MCPServer] = Field(default_factory=dict)
 
     web_host: str = "127.0.0.1"
     web_port: int = 8642
@@ -104,6 +118,57 @@ class Settings(BaseModel):
             self.bunker / "reports",
         ):
             p.mkdir(parents=True, exist_ok=True)
+
+
+# fields the settings screen may change; everything else stays as written in pale.toml
+EDITABLE = (
+    "model", "sub_model", "effort", "max_tokens", "max_steps", "mode", "budget_session_usd", "budget_daily_usd",
+    "compaction", "fallbacks", "prompt_cache", "command_timeout", "shell_backend", "docker_image",
+    "redact_secrets", "allow", "deny", "unit_name", "persona", "web_search", "web_search_max_uses",
+)
+
+
+def _toml_value(v) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    if isinstance(v, Enum):
+        v = v.value
+    if isinstance(v, str):
+        return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    if isinstance(v, (list, tuple)):
+        return "[" + ", ".join(_toml_value(x) for x in v) + "]"
+    if isinstance(v, dict):
+        return "{ " + ", ".join(f'"{k}" = {_toml_value(x)}' for k, x in v.items()) + " }"
+    raise TypeError(f"cannot write {type(v)} to TOML")
+
+
+def dump_toml(settings: Settings) -> str:
+    data = settings.model_dump(exclude={"root"})
+    lines = ["# PALE // operator settings (written by PALE; comments are not preserved)", ""]
+    tables = {}
+    for k, v in data.items():
+        if isinstance(v, dict) and k in ("hooks", "telegram", "mcp"):
+            tables[k] = v
+        else:
+            lines.append(f"{k} = {_toml_value(v)}")
+    for k in ("hooks", "telegram"):
+        lines += ["", f"[{k}]"] + [f"{kk} = {_toml_value(vv)}" for kk, vv in tables[k].items()]
+    for name, srv in tables["mcp"].items():
+        lines += ["", f"[mcp.{name}]"] + [f"{kk} = {_toml_value(vv)}" for kk, vv in srv.items()]
+    return "\n".join(lines) + "\n"
+
+
+def save(settings: Settings) -> Path:
+    """Write settings back to <root>/pale.toml (the previous file is kept as pale.toml.bak)."""
+    path = settings.root / "pale.toml"
+    if path.exists():
+        path.with_suffix(".toml.bak").write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    text = dump_toml(settings)
+    tomllib.loads(text)  # never write a file we can't read back
+    path.write_text(text, encoding="utf-8")
+    return path
 
 
 ENV_OVERRIDES = {
@@ -168,7 +233,15 @@ pre_tool = []
 post_tool = []
 on_stop = []
 
+web_search = false               # server-side web search ($10 per 1,000 searches)
+
 [telegram]
 token_env = "PALE_TELEGRAM_TOKEN"
 allowed_user_ids = []            # your numeric Telegram user id. Empty = gateway refuses to start.
+
+# MCP servers (stdio). Their tools appear as mcp__<name>__<tool> and go through approvals.
+# [mcp.filesystem]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "./sandbox"]
+# trusted = false
 """

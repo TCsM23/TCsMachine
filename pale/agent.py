@@ -37,6 +37,7 @@ from .tools import ALL_TOOLS, BUILTIN_ALLOW, SUBAGENT_TOOLS, Tool, ToolContext, 
 from .tools.shell import clip
 
 PROJECT_FILES = ("PALE.md", "AGENTS.md", "CLAUDE.md")
+IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 
 PERSONA = """\
 You are Unit {unit}, a field unit deployed by PALE, an operator-support harness running on the \
@@ -87,6 +88,7 @@ class Agent:
     ):
         settings.ensure_dirs()
         self.settings = settings
+        self._startup_warnings: list[str] = []
         self.sandbox = Sandbox(settings.sandbox)
         self.policy = Policy(settings)
         self.policy.session_allow.extend(BUILTIN_ALLOW)
@@ -96,7 +98,15 @@ class Agent:
         self.model = model or AnthropicModel()
         self.surface = surface
         self.unattended = unattended
-        self.tools = {t.name: t for t in (tools if tools is not None else ALL_TOOLS)}
+        if tools is None:
+            tools = list(ALL_TOOLS)
+            if settings.mcp:
+                from .mcp import tools_for
+
+                mcp_tools, errors = tools_for(settings)
+                tools += mcp_tools
+                self._startup_warnings = errors
+        self.tools = {t.name: t for t in tools}
         if unattended:
             self.tools.pop("ask_operator", None)
 
@@ -205,23 +215,49 @@ class Agent:
 
     # ----------------------------------------------------------------- the loop
 
-    def run(self, directive: str) -> str:
+    def run(self, directive: str, attachments: list[str] | None = None) -> str:
+        """`attachments` are sandbox-relative paths. Images are shown to the model; other files are
+        listed so the unit knows to read them."""
         if not self._busy.acquire(blocking=False):
             raise RuntimeError("unit is already executing a directive")
         try:
-            return self._run(directive)
+            return self._run(directive, attachments or [])
         finally:
             self._busy.release()
 
-    def _run(self, directive: str) -> str:
+    def _attachment_blocks(self, paths: list[str]) -> list[dict]:
+        import base64
+        import mimetypes
+
+        blocks, listed = [], []
+        for rel in paths:
+            try:
+                full = self.sandbox.resolve(rel)
+            except SandboxViolation:
+                continue
+            if not full.is_file():
+                continue
+            mime = mimetypes.guess_type(full.name)[0] or ""
+            if mime in IMAGE_TYPES and full.stat().st_size <= 5_000_000:
+                data = base64.b64encode(full.read_bytes()).decode()
+                blocks.append({"type": "image", "source": {"type": "base64", "media_type": mime, "data": data}})
+            listed.append(self.sandbox.rel(full))
+        if listed:
+            blocks.append({"type": "text", "text": "Attached files (in the sandbox): " + ", ".join(listed)})
+        return blocks
+
+    def _run(self, directive: str, attachments: list[str] | None = None) -> str:
         self._interrupt.clear()
+        for w in self._startup_warnings:
+            self.emit("warning", message=w)
+        self._startup_warnings = []
         self.steps = 0
         if not self.title:
             self.title = directive.strip().splitlines()[0][:80] if directive.strip() else "untitled"
         self.checkpoints.begin(directive)
         self.blackbox.record("directive", self.session_id, text=directive, surface=self.surface,
                              mode=self.mode.value, dry_run=self.settings.dry_run)
-        self._add_user([{"type": "text", "text": directive}])
+        self._add_user(self._attachment_blocks(attachments or []) + [{"type": "text", "text": directive}])
         final = ""
         try:
             while True:
@@ -295,6 +331,7 @@ class Agent:
             model=s.model, system=self.system_prompt(), tools=[t.schema() for t in self.tools.values()],
             messages=self.messages, max_tokens=s.max_tokens, effort=s.effort,
             compaction=s.compaction, fallbacks=s.fallbacks, cache=s.prompt_cache,
+            web_search=s.web_search_max_uses if s.web_search else 0,
         )
         self.emit("status", message="thinking", step=self.steps)
 
@@ -307,6 +344,11 @@ class Agent:
         self.emit("cost", usd=m.usd, step_usd=usd, input_tokens=m.input_tokens, output_tokens=m.output_tokens,
                   cache_read=m.cache_read, today=self.budget.ledger.today())
         self.blackbox.record("model", self.session_id, model=reply.model, stop=reply.stop_reason, usd=round(usd, 6))
+        for b in reply.content:  # server-side tools (web search) run at the provider; show and log them
+            if b.get("type") == "server_tool_use":
+                q = json.dumps(b.get("input", {}), ensure_ascii=False)[:200]
+                self.emit("tool_call", id=b.get("id", ""), tool=b.get("name", "server_tool"), arg=q, risk="medium", verdict="allow")
+                self.blackbox.record("server_tool", self.session_id, tool=b.get("name"), arg=q)
         return reply
 
     # ----------------------------------------------------------------- tools

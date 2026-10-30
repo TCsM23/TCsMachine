@@ -26,7 +26,11 @@ FALLBACK_PRICE = (10.0, 50.0)  # unknown model: assume the expensive end
 def cost_of(model: str, usage) -> float:
     pin, pout = PRICES.get(model, FALLBACK_PRICE)
     g = lambda k: (getattr(usage, k, None) if not isinstance(usage, dict) else usage.get(k)) or 0  # noqa: E731
-    return (
+    stu = g("server_tool_use")
+    searches = 0
+    if stu:
+        searches = (stu.get("web_search_requests") if isinstance(stu, dict) else getattr(stu, "web_search_requests", 0)) or 0
+    return searches * 0.01 + (
         g("input_tokens") * pin
         + g("cache_creation_input_tokens") * pin * 1.25
         + g("cache_read_input_tokens") * pin * 0.1

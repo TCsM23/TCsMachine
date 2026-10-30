@@ -46,4 +46,8 @@ def redact(text: str) -> tuple[str, int]:
 
 def scrubbed_env() -> dict[str, str]:
     """Environment for child processes: secrets removed, so a command can't read your API key."""
-    return {k: v for k, v in os.environ.items() if not SECRET_ENV.search(k)}
+    env = {k: v for k, v in os.environ.items() if not SECRET_ENV.search(k)}
+    # GIT_CONFIG_KEY_<n> matched the filter; drop the rest of that set too, or git refuses to start
+    if any(k.startswith("GIT_CONFIG_KEY_") for k in os.environ):
+        env = {k: v for k, v in env.items() if not k.startswith("GIT_CONFIG_")}
+    return env

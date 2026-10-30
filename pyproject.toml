@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pale"
-version = "0.1.0"
+dynamic = ["version"]
 description = "PALE: a sandboxed desktop agent harness for the Claude API, from the white city."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -18,16 +18,24 @@ dependencies = [
 
 [project.optional-dependencies]
 web = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
+desktop = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "pywebview>=5.3", "keyring>=24"]
+build = ["pyinstaller>=6.10", "pillow>=10"]
 dev = ["pytest>=8", "fastapi>=0.110", "uvicorn[standard]>=0.29"]
 
 [project.scripts]
 pale = "pale.cli:app"
 
+[project.gui-scripts]
+pale-desktop = "pale.desktop.app:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "pale.__version__" }
+
 [tool.setuptools.packages.find]
 include = ["pale*"]
 
 [tool.setuptools.package-data]
-pale = ["web/static/*"]
+pale = ["web/static/*", "desktop/assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

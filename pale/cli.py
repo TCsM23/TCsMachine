@@ -329,16 +329,22 @@ def serve(host: Optional[str] = None, port: Optional[int] = None, no_scheduler: 
         console.print("[rust]web extras missing:[/] pip install 'pale[web]'")
         raise typer.Exit(1)
     settings = _settings()
-    if not no_scheduler:
-        start_scheduler(settings)
     h, p = host or settings.web_host, port or settings.web_port
     if h not in ("127.0.0.1", "localhost"):
         console.print("[rust]⚠ binding beyond localhost exposes a shell-capable agent to the network.[/]")
     console.print(Text(BANNER, style="bone"))
     console.print(f" [ash]{TAGLINE}[/]\n [bone]web terminal → http://{h}:{p}[/]  [dust]token in the URL printed below[/]")
-    app_ = create_app(settings)
+    app_ = create_app(settings, scheduler=not no_scheduler)
     console.print(f" [ochre]http://{h}:{p}/?token={app_.state.token}[/]")
     uvicorn.run(app_, host=h, port=p, log_level="warning")
+
+
+@app.command()
+def desktop():
+    """Open the desktop app window (needs: pip install 'pale[desktop]')."""
+    from .desktop.app import main as desktop_main
+
+    desktop_main()
 
 
 @app.command()
