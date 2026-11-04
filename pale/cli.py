@@ -227,8 +227,7 @@ def handle_slash(cmd: str, agent: Agent, settings: config.Settings, renderer: Re
         if not args or args[0] not in Mode.__members__:
             console.print(f"  [ash]mode is {agent.mode.value}. choose: {', '.join(Mode.__members__)}[/]")
         else:
-            agent.set_mode(args[0])
-            console.print(f"  [ochre]mode → {args[0].upper()}[/]")
+            agent.set_mode(args[0])  # the renderer prints the mode event
     elif name == "/dry":
         settings.dry_run = (args[0] == "on") if args else not settings.dry_run
         console.print(f"  [ochre]dry run {'ON' if settings.dry_run else 'off'}[/]")

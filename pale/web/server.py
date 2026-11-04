@@ -612,8 +612,7 @@ def create_app(settings: Settings, model=None, desktop=None, scheduler: bool = F
                 elif t == "interrupt":
                     agent.interrupt()
                 elif t == "mode" and msg.get("mode") in Mode.__members__:
-                    agent.set_mode(msg["mode"])
-                    bridge.send({"type": "mode", "mode": agent.mode.value})
+                    agent.set_mode(msg["mode"])  # emits a "mode" event to this window
                 elif t == "model" and re.fullmatch(r"claude-[\w.-]+", str(msg.get("model", ""))):
                     agent.settings.model = msg["model"]
                     bridge.send({"type": "model", "model": agent.settings.model})

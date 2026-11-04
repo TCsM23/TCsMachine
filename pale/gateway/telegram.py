@@ -58,6 +58,12 @@ class Chat:
             line = f"⚠ {d['message'][:120]}"
         elif ev.kind == "error":
             line = f"✕ {d['message'][:200]}"
+        elif ev.kind == "mode":
+            line = f"mode → {d['mode'].upper()}"
+        elif ev.kind == "job":
+            line = f"▶ job {d['id']} · {'running' if d['running'] else d['stopped'] or 'exit ' + str(d['code'])}"
+        elif ev.kind == "review":
+            line = "■ review: no findings" if d["clean"] else f"⚠ review findings:\n{d['text'][:600]}"
         if line:
             self.lines.append(line)
             self.flush_status()
