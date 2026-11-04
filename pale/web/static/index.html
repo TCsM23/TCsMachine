@@ -22,6 +22,7 @@
     <label class="chip">MODE
       <select id="mode">
         <option value="observe">OBSERVE</option>
+        <option value="plan">PLAN</option>
         <option value="ask">ASK</option>
         <option value="edits">EDITS</option>
         <option value="autonomous">AUTONOMOUS</option>
@@ -96,6 +97,10 @@
             <div class="panel-head"><span>TOUCHED FILES</span></div>
             <ul class="touched" id="touched"><li class="dim">nothing changed yet</li></ul>
           </div>
+          <div class="panel" id="jobsPanel" hidden>
+            <div class="panel-head"><span>BACKGROUND JOBS</span></div>
+            <ul class="jobs" id="jobs"></ul>
+          </div>
           <div class="panel">
             <div class="panel-head"><span>UNIT STATUS</span></div>
             <dl class="stats">
@@ -103,6 +108,7 @@
               <dt>Sector</dt><dd id="sandbox" class="wrap">—</dd>
               <dt>Budget</dt><dd id="budget">—</dd>
               <dt>Tokens</dt><dd id="tokens">0 in · 0 out</dd>
+              <dt>Context</dt><dd><span id="ctx">—</span><span class="meter" id="ctxMeter"><i></i></span></dd>
               <dt>Link</dt><dd id="keyState">—</dd>
             </dl>
           </div>
@@ -120,7 +126,7 @@
     </section>
 
     <section class="tab" id="tab-archive">
-      <div class="panel"><div class="panel-head"><span>ARCHIVE // SESSIONS</span><span class="head-acts"><input id="archiveFilter" class="mini" placeholder="filter"><button class="btn small" id="newSession">NEW SESSION</button></span></div>
+      <div class="panel"><div class="panel-head"><span>ARCHIVE // SESSIONS</span><span class="head-acts"><input id="archiveFilter" class="mini" placeholder="search all sessions"><button class="btn small" id="newSession">NEW SESSION</button></span></div>
         <div class="list" id="sessions"></div></div>
     </section>
 
@@ -138,16 +144,26 @@
     <section class="tab" id="tab-skills">
       <div class="panel"><div class="panel-head"><span>SKILLS</span><span class="dim">quarantined skills stay inert until you authorize them</span></div>
         <div class="list" id="skills"></div></div>
+      <div class="panel"><div class="panel-head"><span>SPECIALIST UNITS</span><span class="head-acts"><span class="dim">the unit dispatches these by name · stored in units/</span><button class="btn small" id="newUnit">NEW UNIT</button></span></div>
+        <form class="mem-form" id="unitForm" hidden>
+          <input id="unitName2" placeholder="name, e.g. test-runner" required>
+          <input id="unitDesc" placeholder="when the main unit should dispatch it" required>
+          <div class="row2"><input id="unitModel" placeholder="model (empty: support model)"><input id="unitSteps" type="number" min="1" max="60" placeholder="max steps (15)"></div>
+          <input id="unitTools" placeholder="tools, comma separated (empty: read-only set). Write tools still ask for approval.">
+          <textarea id="unitBody" rows="6" placeholder="instructions: what this specialist does and how it reports"></textarea>
+          <div><button class="btn primary">SAVE UNIT</button> <button type="button" class="btn" id="unitCancel">CANCEL</button></div>
+        </form>
+        <div class="list" id="units"></div></div>
     </section>
 
     <section class="tab" id="tab-schedule">
       <div class="panel"><div class="panel-head"><span>SCHEDULED DIRECTIVES</span></div>
         <form class="sched-form" id="schedForm">
-          <input id="schedSpec" placeholder="every 30m · daily 09:00 · weekdays 08:30 · once 2026-11-01 09:00" required>
+          <input id="schedSpec" placeholder="every 30m · daily 09:00 · weekdays 08:30 · once 2026-11-01 09:00 · watch src/**/*.py" required>
           <input id="schedText" placeholder="directive" required>
           <button class="btn primary">SCHEDULE</button>
         </form>
-        <p class="note dim">Unattended runs can't do anything that needs authorization. They run while the app is open.</p>
+        <p class="note dim">Unattended runs can't do anything that needs authorization. They run while the app is open. A <b>watch</b> spec runs the directive when matching sandbox files change (at most every 2 minutes, 10 times an hour).</p>
         <div class="list" id="schedule"></div></div>
       <div class="panel"><div class="panel-head"><span>FIELD REPORTS</span><button class="btn small" id="openReports" data-desktop>OPEN FOLDER</button></div><div class="list" id="reports"></div></div>
     </section>
@@ -180,7 +196,11 @@
           <label class="check"><input type="checkbox" name="fallbacks"> Refusal fallbacks</label>
         </div></div>
         <div class="panel"><div class="panel-head"><span>SAFETY</span></div><div class="fields">
-          <label>Default mode<select name="mode"><option value="observe">observe</option><option value="ask">ask</option><option value="edits">edits</option><option value="autonomous">autonomous</option></select></label>
+          <label>Default mode<select name="mode"><option value="observe">observe</option><option value="plan">plan</option><option value="ask">ask</option><option value="edits">edits</option><option value="autonomous">autonomous</option></select></label>
+          <label>After a plan is approved<select name="plan_then"><option value="ask">ask</option><option value="edits">edits</option><option value="autonomous">autonomous</option></select></label>
+          <label>Loop guard (identical calls, 0 = off)<input name="loop_guard" type="number" min="0" max="20"></label>
+          <label>Background job limit (s)<input name="job_timeout" type="number" min="10"></label>
+          <label class="check"><input type="checkbox" name="review"> Review pass: a read-only unit checks each directive's diff</label>
           <label>Step limit<input name="max_steps" type="number" min="1" max="500"></label>
           <label>Budget per session ($)<input name="budget_session_usd" type="number" step="0.5" min="0"></label>
           <label>Budget per day ($)<input name="budget_daily_usd" type="number" step="0.5" min="0"></label>
@@ -216,11 +236,12 @@
 <!-- approval -->
 <div class="modal" id="approval" hidden>
   <div class="dialog">
-    <div class="dialog-head"><span class="sq"></span>AUTHORIZATION REQUIRED <span class="risk" id="apRisk"></span></div>
+    <div class="dialog-head"><span class="sq"></span><span id="apHead">AUTHORIZATION REQUIRED</span> <span class="risk" id="apRisk"></span></div>
     <div class="dialog-body">
       <div class="ap-summary" id="apSummary"></div>
       <div class="ap-reasons dim" id="apReasons"></div>
       <pre class="preview" id="apPreview"></pre>
+      <div class="preview plan-preview notes" id="apPlan" hidden></div>
       <input id="apNote" placeholder="optional message to the unit (sent if you deny)">
     </div>
     <div class="dialog-foot">
@@ -229,6 +250,15 @@
       <button class="btn" id="apAlways">ALWAYS THIS SESSION</button>
       <button class="btn danger" id="apNo">DENY</button>
     </div>
+  </div>
+</div>
+
+<!-- job output -->
+<div class="modal" id="jobModal" hidden>
+  <div class="dialog">
+    <div class="dialog-head"><span class="sq"></span>JOB <span id="jobTitle"></span> <span class="dim" id="jobState"></span></div>
+    <div class="dialog-body"><pre class="preview" id="jobOut"></pre></div>
+    <div class="dialog-foot"><button class="btn" id="jobRefresh">REFRESH</button><button class="btn danger" id="jobStop">STOP JOB</button><button class="btn primary" id="jobClose">CLOSE</button></div>
   </div>
 </div>
 
@@ -309,7 +339,7 @@
           <button type="button" class="card" data-model="claude-sonnet-5-5"><b>SONNET 5.5</b><span>Fast, capable, cheaper</span><i>$2 in · $10 out</i></button>
           <button type="button" class="card" data-model="claude-haiku-5-5"><b>HAIKU 5.5</b><span>Cheapest, for testing</span><i>$0.10 in · $0.50 out</i></button>
         </div>
-        <label>Approval mode<select id="wizMode"><option value="ask">ASK: confirm every change (recommended)</option><option value="edits">EDITS: file edits pre-approved</option><option value="observe">OBSERVE: read-only</option></select></label>
+        <label>Approval mode<select id="wizMode"><option value="ask">ASK: confirm every change (recommended)</option><option value="plan">PLAN: approve a plan first, then confirm changes</option><option value="edits">EDITS: file edits pre-approved</option><option value="observe">OBSERVE: read-only</option></select></label>
         <label>Daily budget ($)<input id="wizBudget" type="number" value="10" min="0" step="1"></label>
       </section>
       <section data-step="4">

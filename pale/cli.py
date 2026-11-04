@@ -94,7 +94,21 @@ class Renderer:
             elif k == "denied":
                 console.print(f"    [rust]✕ denied:[/] [ash]{escape(d['reason'])}[/]")
             elif k == "sub_tool_call":
-                console.print(f"    [dust]· support unit → {d['tool']} {escape(d['arg'][:80])}[/]")
+                console.print(f"    [dust]· {d.get('unit', 'support')} unit → {d['tool']} {escape(d['arg'][:80])}[/]")
+            elif k == "sub_denied":
+                console.print(f"    [rust]✕ {d.get('unit', 'support')} unit denied:[/] [ash]{escape(d['reason'])}[/]")
+            elif k == "mode":
+                console.print(f"  [ochre]mode → {d['mode'].upper()}[/]")
+            elif k == "job":
+                state = "running" if d["running"] else (d["stopped"] or f"exit {d['code']}")
+                console.print(f"  [dust]▶ job {d['id']} · {state} · {escape(d['command'][:80])}[/]")
+            elif k == "review":
+                if d["clean"]:
+                    console.print("  [moss]■ review unit: no findings[/]")
+                else:
+                    console.print(Panel(Text(d["text"][:3000], style="bone"), title="[rust]REVIEW UNIT FINDINGS[/]",
+                                        subtitle="[ash]the unit sees these with your next directive[/]", box=BOX,
+                                        border_style="rust", title_align="left"))
             elif k == "todo":
                 mark = {"pending": "[dust]□[/]", "active": "[ochre]▣[/]", "done": "[moss]■[/]"}
                 for i in d["items"]:
@@ -111,6 +125,14 @@ class Renderer:
 
 def cli_approver(req: ApprovalRequest) -> ApprovalDecision:
     body = []
+    if req.tool == "submit_plan":
+        console.print(Panel(Text(req.preview[:8000], style="bone"), title="[ochre]PLAN REVIEW[/] [ash]nothing changes until you approve[/]",
+                            box=BOX, border_style="ochre", title_align="left"))
+        ans = console.input("[op]  approve plan?[/] [ash]\\[y]es  \\[n <what to change>][/] › ").strip()
+        if ans.lower() in ("y", "yes"):
+            return ApprovalDecision(True)
+        note = ans.split(" ", 1)[1] if ans.lower().startswith(("n ", "no ")) else ""
+        return ApprovalDecision(False, note=note)
     if req.preview:
         lexer = "diff" if req.preview.startswith(("---", "@@")) or "\n+" in req.preview else "bash"
         body.append(Syntax(req.preview[:6000], lexer, theme="ansi_dark", word_wrap=True, background_color="default"))
@@ -156,10 +178,13 @@ def banner(settings: config.Settings, agent: Agent) -> None:
 
 
 HELP = """\
-/mode <observe|ask|edits|autonomous>   change approval mode
+/mode <observe|plan|ask|edits|autonomous>   change approval mode
 /dry [on|off]                          toggle dry run
 /undo [id]                             roll back the last directive's file changes
 /checkpoints                           list rollback points
+/rewind <n>                            new session from before directive n (see /sessions)
+/jobs [stop <id>]                      background jobs
+/units                                 specialist units in units/
 /todo                                  show the unit's plan
 /cost                                  token and dollar meter
 /memory  /skills                       list memory and skills
@@ -240,11 +265,58 @@ def handle_slash(cmd: str, agent: Agent, settings: config.Settings, renderer: Re
     elif name == "/audit":
         for e in agent.blackbox.tail(12, agent.session_id):
             console.print(f"  [dust]{datetime.fromtimestamp(e['ts']):%H:%M:%S}[/] [ash]{e['kind']:<12}[/] [dust]{escape(json.dumps(e['data'])[:110])}[/]")
+    elif name == "/jobs":
+        from .jobs import jobs_for
+
+        jobs = jobs_for(settings)
+        if args[:1] == ["stop"] and len(args) > 1:
+            try:
+                jobs.stop(args[1])
+                console.print(f"  [moss]stopped {args[1]}[/]")
+            except KeyError:
+                console.print(f"  [ash]no job {args[1]}[/]")
+        for j in jobs.jobs.values():
+            i = j.info()
+            console.print(f"  [ash]{i['id']}[/] [bone]{'running' if i['running'] else i['stopped'] or 'exit ' + str(i['code'])}[/]"
+                          f" [dust]{i['seconds']}s · {escape(i['command'][:80])}[/]")
+        if not jobs.jobs:
+            console.print("  [ash]no background jobs[/]")
+    elif name == "/units":
+        _print_units(settings)
+    elif name == "/rewind":
+        from .runtime import directive_turns, fork_session
+
+        agent.save()
+        turns = directive_turns(agent.messages)
+        if not args or not args[0].isdigit():
+            for n, i in enumerate(turns):
+                text = next((b["text"] for b in agent.messages[i]["content"] if isinstance(b, dict) and b.get("type") == "text"), "")
+                console.print(f"  [ash]{n}[/] [bone]{escape(text[:100])}[/]")
+            console.print("  [dust]/rewind <n> starts a new session from just before directive n. Files are not changed.[/]")
+        else:
+            try:
+                r = fork_session(settings, agent.session_id, int(args[0]))
+            except IndexError as e:
+                console.print(f"  [ash]{e}[/]")
+                return None
+            console.print(f"  [moss]rewound into new session {r['id']}. The directive was:[/] [ash]{escape(r['directive'][:200])}[/]")
+            return make_cli_agent(settings, renderer, r["id"])
     elif name == "/clear":
         console.clear()
     else:
         console.print("  [ash]unknown command. /help[/]")
     return None
+
+
+def _print_units(settings) -> None:
+    from .units import load_units
+
+    units = load_units(settings.units_dir)
+    if not units:
+        console.print(f"  [ash]no specialist units. Add Markdown files to {settings.units_dir}[/]")
+    for u in units.values():
+        tools = ", ".join(u.tools) if u.tools else "read-only set"
+        console.print(f"  [bone]{u.name}[/] [ash]{escape(u.description)}[/] [dust]· {u.model or 'sub model'} · {tools}[/]")
 
 
 def make_cli_agent(settings, renderer, session_id=None) -> Agent:
@@ -372,6 +444,12 @@ def daemon():
             time.sleep(3600)
     except KeyboardInterrupt:
         pass
+
+
+@app.command()
+def units():
+    """List specialist units (units/*.md) the unit can dispatch."""
+    _print_units(_settings())
 
 
 @app.command()

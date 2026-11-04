@@ -26,10 +26,12 @@ from .. import __version__, blackbox, config
 from ..agent import Agent
 from ..config import EDITABLE, Mode, Settings
 from ..events import ApprovalDecision, ApprovalRequest, Event
-from ..memory import Memory, Skills
+from ..jobs import jobs_for
+from ..memory import Memory, Skills, render, slugify
 from ..permissions import SandboxViolation
-from ..runtime import init_project, list_sessions, transcript, unattended_run
+from ..runtime import fork_session, init_project, list_sessions, search_sessions, transcript, unattended_run
 from ..scheduler import Scheduler, ScheduleStore
+from ..units import load_units
 
 STATIC = Path(__file__).parent / "static"
 MAX_UPLOAD = 20_000_000
@@ -91,6 +93,13 @@ class Context:
         self.want_scheduler = scheduler
         self.scheduler: Scheduler | None = None
         self._start_scheduler()
+        self._watch_jobs()
+
+    def _watch_jobs(self) -> None:
+        jobs = jobs_for(self.settings)
+        if not getattr(jobs, "_pale_web", False):
+            jobs.listeners.append(lambda info: self.broadcast({"type": "job", "job": info}))
+            jobs._pale_web = True
 
     @property
     def b(self) -> Path:
@@ -106,7 +115,8 @@ class Context:
         if self.scheduler:
             self.scheduler.stop()
         s = self.settings
-        self.scheduler = Scheduler(ScheduleStore(s.bunker / "schedule.json"), lambda t: unattended_run(s, t))
+        self.scheduler = Scheduler(ScheduleStore(s.bunker / "schedule.json"), lambda t: unattended_run(s, t),
+                                   watch_root=s.sandbox)
         self.scheduler.notifiers.append(
             lambda task, report: self.broadcast({"type": "scheduled", "name": task["name"], "report": report[:4000]}))
         self.scheduler.start()
@@ -116,6 +126,7 @@ class Context:
         self.settings = config.load(root)
         self.settings.ensure_dirs()
         self._start_scheduler()
+        self._watch_jobs()
         self.broadcast({"type": "workspace", "path": str(root)})
         return self.settings
 
@@ -154,7 +165,8 @@ def create_app(settings: Settings, model=None, desktop=None, scheduler: bool = F
                 "sandbox": str(s.sandbox), "root": str(s.root), "version": __version__,
                 "desktop": ctx.desktop is not None, "platform": sys.platform,
                 "budget": {"session": s.budget_session_usd, "daily": s.budget_daily_usd},
-                "mcp": list(s.mcp), "web_search": s.web_search,
+                "mcp": list(s.mcp), "web_search": s.web_search, "review": s.review,
+                "units": sorted(load_units(s.units_dir)),
                 "has_key": bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))}
 
     @app.get("/api/settings", dependencies=A)
@@ -186,6 +198,18 @@ def create_app(settings: Settings, model=None, desktop=None, scheduler: bool = F
     @app.get("/api/sessions", dependencies=A)
     def sessions():
         return list_sessions(ctx.settings, 200)
+
+    @app.get("/api/sessions/search", dependencies=A)
+    def sessions_search(q: str = ""):
+        return search_sessions(ctx.settings, q[:200])
+
+    @app.post("/api/sessions/{sid}/fork", dependencies=A)
+    def fork(sid: str, body: dict):
+        _session_file(sid)
+        try:
+            return fork_session(ctx.settings, sid, int(body.get("turn", -1)))
+        except (IndexError, ValueError) as e:
+            raise HTTPException(400, str(e))
 
     @app.get("/api/sessions/{sid}", dependencies=A)
     def session(sid: str):
@@ -252,6 +276,55 @@ def create_app(settings: Settings, model=None, desktop=None, scheduler: bool = F
         if action == "delete":
             return {"ok": sk.delete(name)}
         raise HTTPException(400)
+
+    # ------------------------------------------------------------------ specialist units & jobs
+    @app.get("/api/units", dependencies=A)
+    def units():
+        return [{"name": u.name, "description": u.description, "model": u.model, "tools": u.tools,
+                 "max_steps": u.max_steps, "body": u.body} for u in load_units(ctx.settings.units_dir).values()]
+
+    @app.put("/api/units/{name}", dependencies=A)
+    def put_unit(name: str, body: dict):
+        try:
+            slug = slugify(name)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        extra = {k: str(body[k]) for k in ("model", "tools", "max_steps") if str(body.get(k, "")).strip()}
+        if "model" in extra and not re.fullmatch(r"claude-[\w.-]+", extra["model"]):
+            raise HTTPException(400, "model must be a claude-* id")
+        d = ctx.settings.units_dir
+        d.mkdir(exist_ok=True)
+        (d / f"{slug}.md").write_text(render(slug, str(body.get("description", "")), str(body.get("body", "")), **extra),
+                                      encoding="utf-8")
+        return {"ok": True, "name": slug}
+
+    @app.delete("/api/units/{name}", dependencies=A)
+    def delete_unit(name: str):
+        u = load_units(ctx.settings.units_dir).get(name)
+        if not u or not u.path:
+            raise HTTPException(404)
+        u.path.unlink()
+        return {"ok": True}
+
+    @app.get("/api/jobs", dependencies=A)
+    def jobs():
+        return [j.info() for j in jobs_for(ctx.settings).jobs.values()]
+
+    @app.get("/api/jobs/{jid}", dependencies=A)
+    def job(jid: str):
+        jb = jobs_for(ctx.settings)
+        if not jb.get(jid):
+            raise HTTPException(404)
+        from ..redact import redact
+
+        return {**jb.get(jid).info(), "output": redact(jb.tail(jid, 20000))[0]}
+
+    @app.post("/api/jobs/{jid}/stop", dependencies=A)
+    def job_stop(jid: str):
+        try:
+            return jobs_for(ctx.settings).stop(jid).info()
+        except KeyError:
+            raise HTTPException(404)
 
     # ------------------------------------------------------------------ schedule, audit, ledger
     @app.get("/api/schedule", dependencies=A)

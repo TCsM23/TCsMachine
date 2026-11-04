@@ -78,10 +78,15 @@ class Chat:
         key = uuid.uuid4().hex[:10]
         done, box = threading.Event(), {}
         self.waiting[key] = (done, box)
-        preview = f"\n\n{req.preview[:1500]}" if req.preview else ""
+        if req.tool == "submit_plan":
+            head = "PLAN REVIEW (nothing changes until you approve)"
+            preview = f"\n\n{req.preview[:3000]}"
+        else:
+            head = f"AUTHORIZATION REQUIRED [{req.risk.upper()}]\n{req.summary}\n{' · '.join(r for r in req.reasons if r)}"
+            preview = f"\n\n{req.preview[:1500]}" if req.preview else ""
         self.gw.send(
             self.chat_id,
-            f"AUTHORIZATION REQUIRED [{req.risk.upper()}]\n{req.summary}\n{' · '.join(r for r in req.reasons if r)}{preview}",
+            f"{head}{preview}",
             reply_markup={"inline_keyboard": [[
                 {"text": "■ AUTHORIZE", "callback_data": f"ap:{key}:y"},
                 {"text": "✕ DENY", "callback_data": f"ap:{key}:n"},
@@ -189,7 +194,7 @@ class TelegramGateway:
         cmd = cmd.split("@")[0].lower()
         if cmd in ("/start", "/help"):
             self.send(chat.chat_id, "PALE // unit link established.\nSend a directive as a message.\n"
-                                    "/new · /halt · /undo · /cost · /mode <observe|ask|edits|autonomous> · /dry <on|off>")
+                                    "/new · /halt · /undo · /cost · /mode <observe|plan|ask|edits|autonomous> · /dry <on|off>")
         elif cmd == "/new":
             chat.reset()
             self.send(chat.chat_id, "new session.")

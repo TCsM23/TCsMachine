@@ -47,6 +47,8 @@ class Tool:
     Input: ClassVar[type[BaseModel]]
     mutates: ClassVar[bool] = False
     parallel_safe: ClassVar[bool] = True  # read-only tools in one turn run concurrently
+    always_ask: ClassVar[bool] = False  # the operator must answer, even in dry run (submit_plan)
+    pollable: ClassVar[bool] = False  # repeating the same call is normal (job_status); the loop guard ignores it
 
     def schema(self) -> dict:
         s = self.Input.model_json_schema()

@@ -3,13 +3,14 @@
 Order of checks (first match wins):
   1. hard-deny patterns (fork bombs, wiping disks)      -> deny, in every mode
   2. operator `deny` rules from pale.toml               -> deny
-  3. observe mode and the tool mutates                  -> deny
-  4. tool is read-only                                  -> allow
-  5. high risk                                          -> ask, in every mode (even autonomous)
-  6. operator `allow` rules, or "always" this session   -> allow
-  7. edits mode and the tool is a file edit             -> allow
-  8. autonomous mode                                    -> allow
-  9. otherwise                                          -> ask
+  3. submit_plan                                        -> ask in plan mode, deny otherwise
+  4. observe or plan mode and the tool mutates          -> deny
+  5. tool is read-only                                  -> allow
+  6. high risk                                          -> ask, in every mode (even autonomous)
+  7. operator `allow` rules, or "always" this session   -> allow
+  8. edits mode and the tool is a file edit             -> allow
+  9. autonomous mode                                    -> allow
+ 10. otherwise                                          -> ask
 """
 
 from __future__ import annotations
@@ -156,10 +157,16 @@ class Policy:
         for pat in self.settings.deny:
             if rule_matches(pat, tool, arg):
                 return Decision("deny", f"denied by rule {pat}")
+        if tool == "submit_plan":
+            if self.mode == Mode.plan:
+                return Decision("ask", "the operator reviews the plan before anything changes")
+            return Decision("deny", "submit_plan is only used in plan mode")
         if not mutates:
             return Decision("allow", "read-only")
         if self.mode == Mode.observe:
             return Decision("deny", "observe mode: the unit may look but not touch")
+        if self.mode == Mode.plan:
+            return Decision("deny", "plan mode: nothing changes until the operator approves your plan (submit_plan)")
         if risk.level == "high":
             return Decision("ask", "high risk always needs the operator", "")
         for pat in [*self.settings.allow, *self.session_allow]:

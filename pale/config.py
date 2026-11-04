@@ -29,7 +29,8 @@ from pydantic import BaseModel, Field
 class Mode(str, Enum):
     """Approval modes, loosely after Codex CLI's approval policies and Claude Code's permission modes."""
 
-    observe = "observe"  # read-only: every mutating tool is refused (plan mode)
+    observe = "observe"  # read-only: every mutating tool is refused
+    plan = "plan"  # read-only until the operator approves the unit's plan, then `plan_then`
     ask = "ask"  # default: confirm every write, edit and command
     edits = "edits"  # auto-approve file edits inside the sandbox, confirm commands
     autonomous = "autonomous"  # auto-approve all except high-risk actions, which still ask
@@ -66,6 +67,7 @@ class Settings(BaseModel):
     max_tokens: int = 32000
     max_steps: int = 40  # model calls per directive before the harness halts the unit
     mode: Mode = Mode.ask
+    plan_then: Mode = Mode.ask  # the mode a plan-mode unit switches to once its plan is approved
     dry_run: bool = False
 
     budget_session_usd: float = 2.00
@@ -79,6 +81,10 @@ class Settings(BaseModel):
     shell_backend: str = "local"  # local | docker (docker: no network, only the sandbox mounted)
     docker_image: str = "python:3.12-slim"
     max_tool_output_chars: int = 30_000
+    job_timeout: int = 1800  # background jobs are killed after this many seconds
+    max_jobs: int = 4  # background jobs running at once
+    loop_guard: int = 3  # warn on the Nth identical tool call in one directive; halt two calls later (0 = off)
+    review: bool = False  # after a directive that changed files, a read-only unit reviews the diff
     redact_secrets: bool = True
 
     allow: list[str] = Field(default_factory=list)  # e.g. "run_command(git status*)"
@@ -108,6 +114,11 @@ class Settings(BaseModel):
     def bunker(self) -> Path:
         return self.root / "bunker"
 
+    @property
+    def units_dir(self) -> Path:
+        """Operator-written specialist units (Markdown). Outside the sandbox, so the unit can't edit them."""
+        return self.root / "units"
+
     def ensure_dirs(self) -> None:
         for p in (
             self.sandbox,
@@ -125,6 +136,7 @@ EDITABLE = (
     "model", "sub_model", "effort", "max_tokens", "max_steps", "mode", "budget_session_usd", "budget_daily_usd",
     "compaction", "fallbacks", "prompt_cache", "command_timeout", "shell_backend", "docker_image",
     "redact_secrets", "allow", "deny", "unit_name", "persona", "web_search", "web_search_max_uses",
+    "plan_then", "job_timeout", "max_jobs", "loop_guard", "review",
 )
 
 
@@ -212,7 +224,8 @@ model = "claude-opus-5-5"        # main unit. For cheap testing: "claude-haiku-5
 sub_model = "claude-haiku-5-5"   # subagents ("dispatch_unit") and side jobs
 effort = "medium"                # low | medium | high | xhigh | max
 max_steps = 40                   # model calls per directive before a forced halt
-mode = "ask"                     # observe | ask | edits | autonomous
+mode = "ask"                     # observe | plan | ask | edits | autonomous
+plan_then = "ask"                # plan mode: the mode to switch to once you approve the plan
 
 budget_session_usd = 2.00        # hard stop per session
 budget_daily_usd = 10.00         # hard stop per calendar day, across all surfaces
@@ -221,6 +234,10 @@ command_timeout = 60
 shell_backend = "local"          # "docker" runs every command in a throwaway container:
 docker_image = "python:3.12-slim" #   no network, only sandbox/ mounted at /work
 redact_secrets = true
+job_timeout = 1800               # background commands are killed after this many seconds
+loop_guard = 3                   # warn when the unit repeats the same call 3 times; halt at 5 (0 = off)
+review = false                   # true: a cheap read-only unit reviews each directive's diff
+web_search = false               # server-side web search ($10 per 1,000 searches)
 
 # Permission rules. Pattern syntax: tool_name(glob on the main argument).
 # deny always wins; allow skips the confirmation prompt.
@@ -232,8 +249,6 @@ deny = ["run_command(*sudo *)", "write_file(*.env)"]
 pre_tool = []
 post_tool = []
 on_stop = []
-
-web_search = false               # server-side web search ($10 per 1,000 searches)
 
 [telegram]
 token_env = "PALE_TELEGRAM_TOKEN"

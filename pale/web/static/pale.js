@@ -107,6 +107,12 @@
     $("#toasts").appendChild(t);
     setTimeout(() => t.remove(), 7000);
   }
+  function notify(title, body) {  // OS notification while the window is in the background
+    try {
+      if (document.hidden && "Notification" in window && Notification.permission === "granted") new Notification(title, { body: String(body || "").slice(0, 180), icon: "/static/icon.png", silent: true });
+    } catch (_) {}
+  }
+  const askNotify = () => { try { if ("Notification" in window && Notification.permission === "default") Notification.requestPermission(); } catch (_) {} };
   let titleFlash = null;
   function flashTitle(msg) {
     if (!document.hidden || titleFlash) return;
@@ -137,10 +143,14 @@
     if (kind === "text") streamEl.innerHTML = md(streamText); else streamEl.textContent = "∴ " + streamText;
     scroll();
   }
-  function operator(text, atts = []) {
+  let liveTurns = 0;
+  function operator(text, atts = [], turn = null) {
     endStream();
+    if (text.startsWith("[review unit findings")) return add(`<div class="who">REVIEW UNIT</div><div class="body">${md(text.replace(/^\[[^\]]+\]\n?/, ""))}</div>`, "row review");
     const th = atts.length ? `<div class="thumbs">${atts.map((a) => `<span>⧉ ${esc(a)}</span>`).join("")}</div>` : "";
-    add(`<div class="who">OPERATOR</div><div class="body">${esc(text)}${th}</div>`, "row op");
+    const t = turn === null ? liveTurns : turn;
+    liveTurns = t + 1;
+    add(`<div class="who">OPERATOR<button class="rewind" data-rewind="${t}" title="Rewind: start a new session from just before this directive. Files are not changed; use UNDO for that.">⟲ REWIND</button></div><div class="body">${esc(text)}${th}</div>`, "row op");
   }
   function toolCall(d) {
     endStream();
@@ -158,9 +168,9 @@
   }
   const notice = (text, cls = "") => { endStream(); add(esc(text), "notice " + cls); };
   function renderRows(rows) {
-    log.innerHTML = "";
+    log.innerHTML = ""; liveTurns = 0;
     for (const r of rows) {
-      if (r.kind === "text" && r.who === "user") operator(r.text);
+      if (r.kind === "text" && r.who === "user") { if (r.text.startsWith("Attached files (in the sandbox):")) continue; operator(r.text, [], r.turn ?? null); }
       else if (r.kind === "text") add('<div class="who">UNIT</div><div class="body">' + md(r.text) + "</div>", "row unit");
       else if (r.kind === "tool_call") add(`<span class="name">■ ${esc(r.tool)}</span><span class="arg">${esc(r.text)}</span>`, "tool");
       else if (r.kind === "tool_result") add(`<details><summary>${r.ok ? "result" : "error"}</summary><div class="out">${esc(r.text)}</div></details>`, "tool" + (r.ok ? "" : " err"));
@@ -174,6 +184,33 @@
   function renderTouched() {
     $("#touched").innerHTML = touched.size ? [...touched].map(([p, k]) => `<li data-open="${esc(p)}"><b>${k.toUpperCase()}</b>${esc(p)}</li>`).join("") : '<li class="dim">nothing changed yet</li>';
   }
+  const jobs = new Map();
+  function renderJobs() {
+    const rows = [...jobs.values()].sort((a, b) => b.started - a.started).slice(0, 8);
+    $("#jobsPanel").hidden = !rows.length;
+    $("#jobs").innerHTML = rows.map((j) => `<li data-job="${esc(j.id)}" class="${j.running ? "run" : j.code === 0 ? "ok" : "bad"}"><b>${j.running ? "▶" : j.code === 0 ? "■" : "✕"} ${esc(j.id)}</b><span>${esc(j.command)}</span><i>${j.running ? "running" : (j.stopped || "exit " + j.code)}</i></li>`).join("");
+  }
+  function onJob(j) {
+    const prev = jobs.get(j.id);
+    jobs.set(j.id, j); renderJobs();
+    if (prev && prev.running && !j.running) { toast("JOB " + j.id + (j.code === 0 ? " FINISHED" : " ENDED · " + (j.stopped || "exit " + j.code)), j.command, j.code === 0 ? "" : "err", () => openJob(j.id)); notify("PALE · job " + j.id, j.command); }
+    if (!jobModalId || jobModalId !== j.id) return;
+    openJob(j.id);
+  }
+  let jobModalId = "";
+  async function openJob(id) {
+    jobModalId = id;
+    const j = await api("/api/jobs/" + id);
+    $("#jobTitle").textContent = j.id; $("#jobState").textContent = `· ${j.running ? "running" : (j.stopped || "exit " + j.code)} · ${j.seconds}s`;
+    $("#jobOut").textContent = "$ " + j.command + "\n\n" + (j.output || "(no output yet)");
+    $("#jobStop").disabled = !j.running; $("#jobModal").hidden = false;
+    $("#jobOut").scrollTop = $("#jobOut").scrollHeight;
+  }
+  $("#jobs").onclick = (e) => { const li = e.target.closest("[data-job]"); if (li) openJob(li.dataset.job).catch((err) => toast("ERROR", err.message, "err")); };
+  $("#jobRefresh").onclick = () => openJob(jobModalId);
+  $("#jobStop").onclick = async () => { onJob(await post(`/api/jobs/${jobModalId}/stop`)); };
+  $("#jobClose").onclick = () => { $("#jobModal").hidden = true; jobModalId = ""; };
+  api("/api/jobs").then((rows) => { rows.forEach((j) => jobs.set(j.id, j)); renderJobs(); }).catch(() => {});
   $("#touched").onclick = (e) => { const li = e.target.closest("[data-open]"); if (li) { showTab("files"); openFile(li.dataset.open); } };
 
   // ---------------------------------------------------------------- attachments
@@ -224,6 +261,7 @@
         $("#sessionTitle").textContent = m.title ? "· " + m.title.slice(0, 48) : "";
         $("#mode").value = m.mode; setModel(m.model); setDry(m.dry_run);
         renderRows(m.rows); renderPlan(m.todos);
+        $("#ctx").textContent = "—"; $("#ctxMeter i").style.width = "0";
         $("#cost").textContent = money(m.usd);
         $("#toolCount").textContent = m.tools.length + " tools online";
         setBusy(false);
@@ -233,10 +271,11 @@
       case "model": setModel(m.model); notice("model → " + m.model, "warn"); return;
       case "dry": setDry(m.on); return;
       case "approval": return showApproval(m);
-      case "question": blip("alert"); flashTitle("■ UNIT REQUESTS INPUT"); return showQuestion(m);
+      case "question": blip("alert"); flashTitle("■ UNIT REQUESTS INPUT"); notify("PALE · unit requests input", m.text); return showQuestion(m);
       case "update": return onUpdate(m.state);
       case "scheduled": toast("FIELD REPORT · " + m.name, m.report, "", () => showTab("schedule")); blip("done"); return;
-      case "workspace": refreshState(); connect(""); toast("SECTOR CHANGED", m.path); return;
+      case "workspace": refreshState(); connect(""); toast("SECTOR CHANGED", m.path); jobs.clear(); renderJobs(); return;
+      case "job": return onJob(m.job);
     }
     if (m.type !== "event") return;
     const d = m.data;
@@ -248,7 +287,15 @@
         break;
       case "tool_call": toolCall(d); break;
       case "tool_result": toolResult(d); break;
-      case "sub_tool_call": notice("· support unit → " + d.tool + " " + d.arg); break;
+      case "sub_tool_call": notice(`· ${d.unit || "support"} unit → ${d.tool} ${d.arg}`); break;
+      case "sub_denied": notice(`✕ ${d.unit || "support"} unit denied: ${d.tool} · ${d.reason}`, "deny"); break;
+      case "mode": $("#mode").value = d.mode; notice("mode → " + d.mode.toUpperCase(), "warn"); break;
+      case "job": onJob(d); break;
+      case "review":
+        endStream();
+        add(`<div class="who">REVIEW UNIT</div><div class="body">${d.clean ? "<p>■ no findings. The diff checks out.</p>" : md(d.text)}</div>`, "row review" + (d.clean ? " clean" : ""));
+        if (!d.clean) toast("REVIEW FINDINGS", "the review unit flagged the last change. It will see them with your next directive.", "err");
+        break;
       case "denied": notice("✕ denied: " + d.tool + " · " + d.reason, "deny"); break;
       case "warning": if (!String(d.message).startsWith("malformed")) notice("⚠ " + d.message, "warn"); break;
       case "error": notice("✕ " + d.message, "err"); blip("err"); setBusy(false); break;
@@ -256,11 +303,12 @@
       case "cost":
         $("#cost").textContent = money(d.usd); $("#today").textContent = money(d.today, 2);
         $("#tokens").textContent = `${d.input_tokens.toLocaleString()} in · ${d.output_tokens.toLocaleString()} out · ${d.cache_read.toLocaleString()} cached`;
+        if (d.context) setCtx(d.context);
         break;
       case "done":
         endStream();
         add(`── REPORT FILED · ${d.steps} STEP(S) · ${money(d.usd)} SESSION`, "report-end");
-        setBusy(false); blip("done"); flashTitle("■ REPORT FILED");
+        setBusy(false); blip("done"); flashTitle("■ REPORT FILED"); notify("PALE · report filed", d.text);
         break;
     }
   }
@@ -268,7 +316,8 @@
   // ---------------------------------------------------------------- approvals & questions
   const pendingApprovals = [];
   function showApproval(m) {
-    pendingApprovals.push(m); blip("alert"); flashTitle("■ AUTHORIZATION REQUIRED");
+    pendingApprovals.push(m); blip("alert"); flashTitle(m.tool === "submit_plan" ? "■ PLAN READY FOR REVIEW" : "■ AUTHORIZATION REQUIRED");
+    notify(m.tool === "submit_plan" ? "PALE · plan ready for review" : "PALE · authorization required", m.summary);
     if (pendingApprovals.length === 1) openApproval();
   }
   function openApproval() {
@@ -276,9 +325,20 @@
     if (!m) { $("#approval").hidden = true; return; }
     $("#apRisk").className = "risk " + m.risk; $("#apRisk").textContent = m.risk;
     $("#apSummary").textContent = m.summary;
-    $("#apReasons").textContent = (m.reasons || []).filter(Boolean).join(" · ");
-    $("#apPreview").innerHTML = m.preview ? diffHtml(m.preview) : "(no preview)";
-    $("#apNote").value = ""; $("#apAlways").disabled = m.risk === "high";
+    $("#apReasons").textContent = m.tool === "submit_plan" ? "" : (m.reasons || []).filter(Boolean).join(" · ");
+    $("#approval .keys").textContent = m.tool === "submit_plan" ? "Y approve · N / Esc send back" : "Y authorize · A always · N / Esc deny";
+    const plan = m.tool === "submit_plan";
+    $("#apHead").textContent = plan ? "PLAN REVIEW" : "AUTHORIZATION REQUIRED";
+    $("#apRisk").hidden = plan;
+    $("#apSummary").textContent = plan ? "The unit has investigated and filed a plan. Nothing changes until you approve it." : m.summary;
+    $("#apPreview").hidden = plan; $("#apPlan").hidden = !plan;
+    if (plan) $("#apPlan").innerHTML = md(m.preview || "");
+    else $("#apPreview").innerHTML = m.preview ? diffHtml(m.preview) : "(no preview)";
+    $("#apYes").textContent = plan ? "APPROVE PLAN" : "AUTHORIZE";
+    $("#apNo").textContent = plan ? "SEND BACK" : "DENY";
+    $("#apAlways").hidden = plan;
+    $("#apNote").placeholder = plan ? "what to change in the plan (sent if you send it back)" : "optional message to the unit (sent if you deny)";
+    $("#apNote").value = ""; $("#apAlways").disabled = m.risk === "high" || plan;
     $("#approval").hidden = false; $("#apYes").focus();
   }
   function answerApproval(approved, always) {
@@ -298,6 +358,7 @@
     text = (text ?? $("#text").value).trim();
     if (!text) return;
     if (busy) { toast("UNIT BUSY", "HALT first, or wait for the report."); return; }
+    askNotify();
     const atts = attachments.map((a) => a.path);
     operator(text, atts);
     send({ type: "directive", text, attachments: atts });
@@ -318,6 +379,14 @@
     sel.value = m; $("#model").textContent = m;
   }
   function setDry(on) { $("#dry").setAttribute("aria-pressed", on ? "true" : "false"); $("#dry b").textContent = on ? "ON" : "OFF"; }
+  function setCtx(n) {
+    const win = /haiku/.test($("#modelSel").value) ? 200000 : 1000000;  // approximate window, for the meter only
+    $("#ctx").textContent = (n >= 1000 ? (n / 1000).toFixed(1) + "k" : n) + " tokens";
+    const pct = Math.min(100, (n / win) * 100);
+    $("#ctxMeter i").style.width = pct.toFixed(1) + "%";
+    $("#ctxMeter").classList.toggle("hot", pct > 70);
+    $("#ctxMeter").title = `last request: ${n.toLocaleString()} input tokens. Long sessions are compacted on the server.`;
+  }
   $("#dry").onclick = () => send({ type: "dry", on: $("#dry").getAttribute("aria-pressed") !== "true" });
 
   let templates = [];
@@ -378,16 +447,29 @@
 
   // archive
   let sessionsCache = [];
+  let searchHits = null, searchTimer = null;
   const renderSessions = () => {
-    const q = $("#archiveFilter").value.toLowerCase();
-    const rows = sessionsCache.filter((r) => !q || (r.title + r.id).toLowerCase().includes(q));
+    if (searchHits) {
+      $("#sessions").innerHTML = searchHits.map((r) => `
+        <div class="item"><div class="t">${esc(r.title || "untitled")}${r.id === sessionId ? ' <span class="tag">ACTIVE</span>' : ""}</div>
+        <div class="d snippet">${esc(r.who === "user" ? "operator: " : r.who === "assistant" ? "unit: " : "")}${highlight(r.snippet, $("#archiveFilter").value)}</div>
+        <div class="acts"><button class="btn small" data-resume="${esc(r.id)}">RESUME</button><button class="btn small" data-export="${esc(r.id)}">EXPORT</button></div></div>`).join("") || '<div class="item dim">no session mentions that</div>';
+      return;
+    }
+    const rows = sessionsCache;
     $("#sessions").innerHTML = rows.map((r) => `
       <div class="item"><div class="t">${esc(r.title || "untitled")}${r.id === sessionId ? ' <span class="tag">ACTIVE</span>' : ""}</div>
       <div class="d">${esc(r.id)} · ${esc(r.surface)} · ${r.turns} msgs · ${money(r.usd)} · ${new Date(r.updated * 1000).toLocaleString()}</div>
       <div class="acts"><button class="btn small" data-resume="${esc(r.id)}">RESUME</button><button class="btn small" data-rename="${esc(r.id)}">RENAME</button><button class="btn small" data-export="${esc(r.id)}">EXPORT</button><button class="btn small danger" data-delsess="${esc(r.id)}">DELETE</button></div></div>`).join("") || '<div class="item dim">archive empty</div>';
   };
+  const highlight = (text, q) => { const e = esc(text), qq = esc(q.trim()); if (!qq) return e; const i = e.toLowerCase().indexOf(qq.toLowerCase()); return i < 0 ? e : e.slice(0, i) + "<mark>" + e.slice(i, i + qq.length) + "</mark>" + e.slice(i + qq.length); };
   loaders.archive = async () => { sessionsCache = await api("/api/sessions"); renderSessions(); };
-  $("#archiveFilter").oninput = renderSessions;
+  $("#archiveFilter").oninput = () => {
+    clearTimeout(searchTimer);
+    const q = $("#archiveFilter").value.trim();
+    if (q.length < 2) { searchHits = null; renderSessions(); return; }
+    searchTimer = setTimeout(async () => { searchHits = await api("/api/sessions/search?q=" + encodeURIComponent(q)).catch(() => []); renderSessions(); }, 220);
+  };
 
   // memory
   loaders.memory = async () => {
@@ -414,6 +496,29 @@
       <div class="d">${esc(s.description)}</div>
       <div class="acts">${s.quarantined ? `<button class="btn small" data-approve="${esc(s.name)}">AUTHORIZE</button><button class="btn small danger" data-reject="${esc(s.name)}">REJECT</button>` : `<button class="btn small danger" data-delskill="${esc(s.name)}">DELETE</button>`}</div>
       <pre>${esc(s.body)}</pre></div>`).join("") || '<div class="item dim">no skills yet. The unit proposes them after work it would repeat.</div>';
+    const units = await api("/api/units");
+    loaders.skills.units = units;
+    $("#units").innerHTML = units.map((u) => `
+      <div class="item"><div class="t">${esc(u.name)} <span class="tag">${esc(u.model || "support model")}</span></div>
+      <div class="d">${esc(u.description)} · tools: ${esc(u.tools.length ? u.tools.join(", ") : "read-only set")} · ${u.max_steps} steps</div>
+      <div class="acts"><button class="btn small" data-editunit="${esc(u.name)}">EDIT</button><button class="btn small danger" data-delunit="${esc(u.name)}">DELETE</button></div>
+      <pre>${esc(u.body)}</pre></div>`).join("") || '<div class="item dim">no specialist units. Add one, or drop a Markdown file into units/.</div>';
+  };
+  const unitForm = (u = {}) => {
+    $("#unitForm").hidden = false;
+    $("#unitName2").value = u.name || ""; $("#unitDesc").value = u.description || ""; $("#unitModel").value = u.model || "";
+    $("#unitSteps").value = u.max_steps || ""; $("#unitTools").value = (u.tools || []).join(", "); $("#unitBody").value = u.body || "";
+    $("#unitName2").focus();
+  };
+  $("#newUnit").onclick = () => unitForm();
+  $("#unitCancel").onclick = () => { $("#unitForm").hidden = true; };
+  $("#unitForm").onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await put("/api/units/" + encodeURIComponent($("#unitName2").value.trim()), { description: $("#unitDesc").value, model: $("#unitModel").value.trim(),
+        max_steps: $("#unitSteps").value, tools: $("#unitTools").value.trim(), body: $("#unitBody").value });
+      $("#unitForm").hidden = true; loaders.skills();
+    } catch (err) { toast("CAN'T SAVE UNIT", err.message, "err"); }
   };
 
   // schedule
@@ -497,6 +602,14 @@
     const d = e.target.dataset || {};
     try {
       if (d.resume) { connect(d.resume); showTab("directive"); }
+      if (d.rewind !== undefined) {
+        if (busy) return toast("UNIT BUSY", "HALT first, then rewind.");
+        const r = await post(`/api/sessions/${sessionId}/fork`, { turn: +d.rewind });
+        connect(r.id); $("#text").value = r.directive; $("#text").focus();
+        toast("REWOUND", "new session from before that directive. The original is in the archive. Files were not changed.");
+      }
+      if (d.editunit) unitForm(loaders.skills.units.find((u) => u.name === d.editunit));
+      if (d.delunit && confirm("Delete specialist unit " + d.delunit + "?")) { await api("/api/units/" + encodeURIComponent(d.delunit), { method: "DELETE" }); loaders.skills(); }
       if (d.rename) { const t = prompt("New title:"); if (t) { await api("/api/sessions/" + d.rename, { method: "PATCH", body: JSON.stringify({ title: t }) }); loaders.archive(); } }
       if (d.export) {
         const text = await api("/api/sessions/" + d.export + "/export");
@@ -637,7 +750,10 @@
     ["Halt the unit", "ctrl+.", halt],
     ["Undo last directive's changes", "", () => send({ type: "undo" })],
     ["Toggle dry run", "", () => $("#dry").click()],
-    ...["observe", "ask", "edits", "autonomous"].map((m) => ["Mode: " + m, "mode", () => { $("#mode").value = m; send({ type: "mode", mode: m }); }]),
+    ["Search the archive", "archive", () => { showTab("archive"); $("#archiveFilter").focus(); }],
+    ["Rewind to before the last directive", "session", () => { const b = $$(".rewind").pop(); if (b) b.click(); else toast("NOTHING TO REWIND"); }],
+    ["Show background jobs", "jobs", () => { const j = [...jobs.keys()].pop(); if (j) openJob(j); else toast("NO JOBS", "the unit hasn't started any"); }],
+    ...["observe", "plan", "ask", "edits", "autonomous"].map((m) => ["Mode: " + m, "mode", () => { $("#mode").value = m; send({ type: "mode", mode: m }); }]),
     ...[...$("#modelSel").options].map((o) => ["Model: " + o.text, "model", () => { $("#modelSel").value = o.value; send({ type: "model", model: o.value }); }]),
     ...$$(".menu button").map((b) => ["Go to " + b.textContent.trim(), "tab", () => showTab(b.dataset.tab)]),
     ["Toggle day / night", "theme", () => $("#themeBtn").click()],
@@ -677,6 +793,7 @@
     if (e.key === "Escape") {
       if (!$("#palette").hidden) { $("#palette").hidden = true; return; }
       if (!$("#updateModal").hidden) { $("#updateModal").hidden = true; return; }
+      if (!$("#jobModal").hidden) { $("#jobModal").hidden = true; jobModalId = ""; return; }
     }
     if (!$("#approval").hidden && document.activeElement !== $("#apNote")) {
       const k = e.key.toLowerCase();

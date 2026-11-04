@@ -190,6 +190,7 @@ textarea:focus, input:focus { border-color: var(--ink); box-shadow: 2px 2px 0 va
 /* ------------------------------------------------ modal */
 .modal { position: fixed; inset: 0; z-index: 60; background: var(--overlay); display: grid; place-items: center; padding: 16px; }
 .modal[hidden] { display: none; }
+[hidden] { display: none !important; }
 .dialog { width: min(760px, 100%); max-height: 90vh; display: flex; flex-direction: column; background: var(--paper); border: 1px solid var(--ink); box-shadow: 8px 8px 0 var(--shadow); animation: in .2s; }
 .dialog-head { background: var(--ink); color: var(--paper); font: 14px var(--display); letter-spacing: .22em; padding: 9px 16px; display: flex; align-items: center; gap: 4px; }
 .dialog-head .sq { background: var(--rust); }
@@ -355,3 +356,30 @@ body:not(.is-desktop) [data-desktop] { display: none !important; }
   .top-right { margin-left: 0; }
   .ws-chip { max-width: 100%; }
 }
+
+/* ---- v0.3: rewind, review, jobs, context meter, plan review, units */
+.row .who .rewind { margin-left: 10px; font: 10px var(--display); letter-spacing: .14em; color: var(--ink-3); background: none;
+  border: 1px solid transparent; padding: 0 5px; cursor: pointer; opacity: 0; transition: opacity .15s; }
+.row.op:hover .rewind, .rewind:focus-visible { opacity: 1; }
+.rewind:hover { border-color: var(--line); color: var(--ink); }
+.row.review .who { color: var(--rust); }
+.row.review .body { border-left: 3px solid var(--rust); padding: 4px 12px; background: var(--paper-2); }
+.row.review.clean .who { color: var(--moss); }
+.row.review.clean .body { border-left-color: var(--moss); }
+.row.review .body p { margin: 0 0 6px; }
+.jobs { list-style: none; margin: 0; padding: 8px 14px; font-size: 12.5px; }
+.jobs li { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; padding: 3px 0; cursor: pointer; align-items: baseline; }
+.jobs li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jobs li b { font: 11px var(--display); letter-spacing: .08em; }
+.jobs li i { font-style: normal; font-size: 11px; color: var(--ink-3); }
+.jobs li.run b { color: var(--ochre); animation: pulse 2.4s ease-in-out infinite; }
+.jobs li.ok b { color: var(--moss); } .jobs li.bad b { color: var(--rust); }
+.jobs li:hover span { color: var(--ochre); }
+.meter { display: block; height: 3px; background: var(--paper-3); margin-top: 4px; }
+.meter i { display: block; height: 100%; width: 0; background: var(--ink-2); transition: width .4s; }
+.meter.hot i { background: var(--rust); }
+.plan-preview { white-space: normal; background: var(--paper-2); color: var(--ink); max-height: 50vh; }
+.plan-preview p { margin: 0 0 8px; }
+#jobOut { max-height: 56vh; white-space: pre-wrap; word-break: break-word; }
+.snippet mark { background: var(--ochre); color: var(--paper); padding: 0 2px; }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }

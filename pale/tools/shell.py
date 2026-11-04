@@ -34,7 +34,9 @@ class RunCommand(Tool):
     name = "run_command"
     description = (
         "Run a shell command in the sandbox directory and return exit code, stdout and stderr. "
-        "No interactive programs. Prefer the file tools for reading and editing files."
+        "No interactive programs. Prefer the file tools for reading and editing files. "
+        "Set background=true for long-running commands (dev servers, watchers, long test suites): "
+        "it returns a job id at once; check on it with job_status and end it with job_stop."
     )
     mutates = True
     parallel_safe = False
@@ -42,26 +44,47 @@ class RunCommand(Tool):
     class Input(BaseModel):
         command: str
         timeout: int | None = Field(None, ge=1, le=600, description="Seconds; defaults to the operator's setting")
+        background: bool = Field(False, description="Run detached and return a job id immediately")
 
     def risk(self, inp, ctx):
         return score_command(inp.command)
 
     def preview(self, inp, ctx):
         backend = ctx.settings.shell_backend
-        return f"$ {inp.command}\n  (cwd: sandbox/, backend: {backend})"
+        bg = f", in the background for up to {ctx.settings.job_timeout}s" if inp.background else ""
+        return f"$ {inp.command}\n  (cwd: sandbox/, backend: {backend}{bg})"
 
-    def _argv(self, inp, ctx) -> tuple[list[str] | str, bool]:
+    def _argv(self, inp, ctx, name: str = "") -> tuple[list[str] | str, bool]:
         if ctx.settings.shell_backend == "docker":
             if not shutil.which("docker"):
                 raise ToolError("shell_backend is docker but docker is not installed")
             return [
                 "docker", "run", "--rm", "--network", "none", "--memory", "1g", "--cpus", "1",
+                *(["--name", name] if name else []),
                 "-v", f"{ctx.sandbox.root}:/work", "-w", "/work", ctx.settings.docker_image,
                 "sh", "-lc", inp.command,
             ], False
         return inp.command, True
 
+    def _background(self, inp, ctx):
+        import uuid
+
+        from ..jobs import jobs_for
+
+        jid = "j" + uuid.uuid4().hex[:5]
+        container = f"pale-{jid}" if ctx.settings.shell_backend == "docker" else ""
+        argv, shell = self._argv(inp, ctx, container)
+        try:
+            job = jobs_for(ctx.settings).start(inp.command, argv, shell=shell, cwd=ctx.sandbox.root,
+                                               env=scrubbed_env(), container=container, job_id=jid)
+        except RuntimeError as e:
+            raise ToolError(str(e))
+        ctx.agent.emit("job", **job.info())
+        return f"started background job {job.id}: {inp.command}\nCheck it with job_status(id='{job.id}'); stop it with job_stop."
+
     def run(self, inp, ctx):
+        if inp.background:
+            return self._background(inp, ctx)
         argv, shell = self._argv(inp, ctx)
         timeout = inp.timeout or ctx.settings.command_timeout
         try:
@@ -82,7 +105,8 @@ class RunCommand(Tool):
 
     def dry(self, inp, ctx):
         r = score_command(inp.command)
-        return f"[dry run] would run: {inp.command}  (risk {r.level}: {', '.join(r.reasons) or 'none'}). Nothing ran."
+        where = " in the background" if inp.background else ""
+        return f"[dry run] would run{where}: {inp.command}  (risk {r.level}: {', '.join(r.reasons) or 'none'}). Nothing ran."
 
 
 class FetchUrl(Tool):
@@ -121,4 +145,56 @@ class FetchUrl(Tool):
         return f"status {r.status_code} from {r.url}\n<untrusted_web_content>\n{body}\n</untrusted_web_content>"
 
 
-TOOLS = [RunCommand(), FetchUrl()]
+class JobStatus(Tool):
+    name = "job_status"
+    description = (
+        "Check background jobs started with run_command(background=true). With an id: state, exit code "
+        "and the tail of its output. Without: a list of all jobs. Wait a little between checks."
+    )
+    pollable = True
+
+    class Input(BaseModel):
+        id: str = ""
+        tail: int = Field(4000, ge=200, le=20000, description="characters of output to return")
+
+    def run(self, inp, ctx):
+        from ..jobs import jobs_for
+
+        jobs = jobs_for(ctx.settings)
+        if not inp.id:
+            rows = [j.info() for j in jobs.jobs.values()]
+            if not rows:
+                return "no background jobs"
+            return "\n".join(f"{r['id']}  {'running' if r['running'] else 'exit ' + str(r['code'])}"
+                             f"{' (' + r['stopped'] + ')' if r['stopped'] else ''}  {r['seconds']}s  {r['command']}" for r in rows)
+        job = jobs.get(inp.id)
+        if not job:
+            raise ToolError(f"no job {inp.id}")
+        i = job.info()
+        state = "running" if i["running"] else f"exited with code {i['code']}" + (f" ({i['stopped']})" if i["stopped"] else "")
+        return f"job {job.id}: {state} after {i['seconds']}s\n$ {job.command}\noutput (tail):\n{jobs.tail(job.id, inp.tail) or '(none yet)'}"
+
+
+class JobStop(Tool):
+    name = "job_stop"
+    description = "Stop a background job (and the processes it started)."
+    mutates = True
+
+    class Input(BaseModel):
+        id: str
+
+    def risk(self, inp, ctx):
+        return Risk("low", ["stops a job the unit started"])
+
+    def run(self, inp, ctx):
+        from ..jobs import jobs_for
+
+        try:
+            job = jobs_for(ctx.settings).stop(inp.id)
+        except KeyError:
+            raise ToolError(f"no job {inp.id}")
+        ctx.agent.emit("job", **job.info())
+        return f"job {job.id} stopped (exit code {job.code})"
+
+
+TOOLS = [RunCommand(), FetchUrl(), JobStatus(), JobStop()]

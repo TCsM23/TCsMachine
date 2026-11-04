@@ -79,9 +79,9 @@ To build locally: `pip install -e ".[desktop,build]"`, `python packaging/make_ic
 | `pale gateway` | Telegram bot. You approve actions with inline buttons, and only allow-listed user ids can talk to it. Also runs the scheduler. |
 | `pale daemon` | Runs the scheduler only. |
 
-Slash commands in chat: `/mode`, `/dry`, `/undo`, `/checkpoints`, `/todo`, `/cost`, `/memory`, `/skills`, `/sessions`, `/resume ID`, `/new`, `/audit`, `/quit`.
+Slash commands in chat: `/mode`, `/dry`, `/undo`, `/checkpoints`, `/rewind`, `/jobs`, `/units`, `/todo`, `/cost`, `/memory`, `/skills`, `/sessions`, `/resume ID`, `/new`, `/audit`, `/quit`.
 
-Other commands: `pale memory list|show|forget`, `pale skills list|show|approve|reject`, `pale schedule add|list|remove|run-now`, `pale audit verify|tail`, `pale undo`, `pale cost`, `pale sessions`, `pale doctor`.
+Other commands: `pale memory list|show|forget`, `pale skills list|show|approve|reject`, `pale schedule add|list|remove|run-now`, `pale audit verify|tail`, `pale undo`, `pale cost`, `pale sessions`, `pale units`, `pale doctor`.
 
 ## What it has
 
@@ -92,12 +92,16 @@ Most of the design comes from harnesses that already work well. The table shows 
 | Agent loop with streaming and parallel tool calls | `agent.py` | Claude Code, every serious harness |
 | File tools: line-numbered read, exact-string edit, glob, regex search | `tools/fs.py` | Claude Code's Read/Edit, Aider's search/replace blocks |
 | Read-before-write (refuses to overwrite a file that's unread or changed since it was read) | `tools/fs.py` | Claude Code |
-| Approval modes: observe, ask, edits, autonomous | `permissions.py` | Codex CLI approval policies, Claude Code permission modes |
+| Approval modes: observe, plan, ask, edits, autonomous | `permissions.py` | Codex CLI approval policies, Claude Code permission modes |
+| Plan mode: investigate, file a plan, wait for approval | `submit_plan` | Claude Code plan mode |
 | Allow/deny rules like `run_command(git status*)` | `pale.toml` | Claude Code settings |
 | Hooks (pre_tool, post_tool, on_stop; exit 2 blocks) | `hooks.py` | Claude Code hooks |
 | Project instructions file (`PALE.md`, `AGENTS.md` or `CLAUDE.md`) | system prompt | Claude Code, Codex |
 | Plan/todo tool shown live in the UI | `tools/unit.py` | Claude Code TodoWrite |
 | Read-only subagents on a cheaper model | `dispatch_unit` | Claude Code subagents |
+| Specialist units defined in Markdown | `units.py`, `units/*.md` | Claude Code custom subagents |
+| Background commands with status and stop | `jobs.py` | Claude Code background bash |
+| Rewind a conversation to an earlier point | `runtime.fork_session` | Claude Code rewind, ChatGPT edit-and-branch |
 | Persistent memory (index in the prompt, bodies on demand) | `memory.py` | Hermes, Claude Code memory |
 | Skills the agent writes for itself | `memory.py` | Hermes |
 | Scheduler for unattended directives | `scheduler.py` | Hermes |
@@ -128,6 +132,33 @@ These are things few harnesses ship, or ship only partially.
 8. **Network calls count as mutations.** `fetch_url` goes through the approval gate, because a URL can carry data out. Long query strings are flagged as high risk.
 9. **Untrusted MCP servers are gated.** Tools from an MCP server count as mutating, so they ask for approval and are logged in the black box, unless you mark that server `trusted = true`.
 10. **Verified self-update.** The updater refuses any download whose SHA-256 isn't listed in the release's checksum file.
+11. **Review pass.** With `review = true`, every directive that changed files is followed by a read-only unit that reads the diff and reports real defects. If it finds any, the main unit gets them with your next directive. If there's a `units/reviewer.md`, that specialist does the review.
+12. **Loop guard.** The harness counts identical tool calls within a directive. On the 3rd it tells the unit the result won't change; on the 5th it stops the directive. Polling tools like `job_status` are exempt.
+13. **Watchers that can't feed themselves.** A `watch <glob>` schedule runs a directive when sandbox files change. The watcher re-reads the files after its own run, so the run's edits don't trigger it again, and it has a 2-minute cooldown and a 10-per-hour cap.
+14. **Specialists can't escalate.** Specialist units can't dispatch other units, ask you questions, schedule work or propose skills. Write tools are removed from them in observe and plan mode. Otherwise every write goes through the same approvals, rules, checkpoints and black box as the main unit, so `undo` rolls back their edits too.
+
+### Plan mode
+
+![plan review](docs/plan.png)
+
+Set the mode to **PLAN**. The unit can read and search but nothing else until it calls `submit_plan` with an approach and a checklist. The plan opens in a review dialog. **Approve** loads the checklist into the plan panel and switches to `plan_then` (default `ask`). **Send back** returns your note, and the unit revises the plan. Approving a plan never skips the normal approvals that come after it. Unattended runs in plan mode stay read-only.
+
+### Specialist units
+
+A specialist is a Markdown file in `units/` (next to `sandbox/`, so the unit can't edit it). `pale init` writes an example reviewer:
+
+```markdown
+---
+name: test-runner
+description: runs the test suite and summarizes failures; dispatch after code changes
+model: claude-haiku-5-5
+tools: run_command, read_file, search
+max_steps: 12
+---
+Run the project's tests. Report each failure as file:line and the assertion that failed.
+```
+
+The main unit sees the roster in its prompt and calls `dispatch_unit(task, unit="test-runner")`. Without `tools`, a specialist gets the read-only set. You can also create and edit specialists on the Skills screen.
 
 ## Safety model
 
@@ -147,7 +178,11 @@ These are things few harnesses ship, or ship only partially.
 model = "claude-opus-5-5"       # "claude-haiku-5-5" for cheap testing
 sub_model = "claude-haiku-5-5"  # dispatched support units
 effort = "medium"
-mode = "ask"
+mode = "ask"                    # observe | plan | ask | edits | autonomous
+plan_then = "ask"               # plan mode switches to this once you approve the plan
+review = false                  # true: a read-only unit reviews each directive's diff
+loop_guard = 3                  # warn on the 3rd identical call, stop on the 5th (0 = off)
+job_timeout = 1800              # background jobs are killed after this many seconds
 max_steps = 40
 budget_session_usd = 2.00
 budget_daily_usd = 10.00
@@ -188,7 +223,9 @@ pale/
   agent.py          the loop: step limit, budget, interrupts, tool gating, subagents
   model.py          Claude API client (beta stream: compaction, fallbacks, caching, effort)
   permissions.py    sandbox, risk scoring, allow/ask/deny policy
-  tools/            fs.py · shell.py · git.py · unit.py (memory, skills, todo, schedule, subagent, ask)
+  tools/            fs.py · shell.py (commands, jobs) · git.py · unit.py (memory, skills, todo, plan, schedule, subagents, ask)
+  jobs.py           background jobs: detached processes, logs, lifetime limit
+  units.py          specialist units from units/*.md
   mcp.py            MCP stdio client; server tools become mcp__<server>__<tool>
   blackbox.py       hash-chained audit log
   redact.py         secret scrubbing
@@ -204,7 +241,7 @@ pale/
   gateway/          Telegram
   testing.py        FakeModel for tests
 packaging/         icons, PyInstaller spec, Inno Setup wizard, release helpers
-tests/             77 tests, no API key needed
+tests/             99 tests, no API key needed
 ```
 
 ## Tests
@@ -214,7 +251,7 @@ pip install -e ".[dev]"
 pytest -q
 ```
 
-The tests drive the real loop with `pale.testing.FakeModel`, a scripted stand-in for Claude, so they cost nothing and still exercise real side effects in temporary folders. They cover sandbox escapes, approvals, dry runs, step limits, undo, redaction, the audit chain, budget stops, hooks, skill quarantine, the web socket flow, Telegram button approvals, the updater against a fake GitHub, the desktop endpoints, attachments, MCP and git.
+The tests drive the real loop with `pale.testing.FakeModel`, a scripted stand-in for Claude, so they cost nothing and still exercise real side effects in temporary folders. They cover sandbox escapes, approvals, dry runs, step limits, undo, redaction, the audit chain, budget stops, hooks, skill quarantine, the web socket flow, Telegram button approvals, the updater against a fake GitHub, the desktop endpoints, attachments, MCP, git, plan mode, specialist units, background jobs, watchers, rewind, the review pass and the loop guard.
 
 ```python
 from pale.testing import FakeModel, call, say

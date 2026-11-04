@@ -131,7 +131,8 @@ class Schedule(Tool):
     name = "schedule_directive"
     description = (
         "Schedule a directive to run later without the operator present. spec: 'every 30m', "
-        "'every 2h', 'daily 09:00', 'weekdays 08:30' or 'once 2026-11-01 09:00'. Unattended runs "
+        "'every 2h', 'daily 09:00', 'weekdays 08:30', 'once 2026-11-01 09:00', or 'watch <glob>' "
+        "(e.g. 'watch src/**/*.py') to run whenever matching sandbox files change. Unattended runs "
         "cannot do anything that needs approval."
     )
     mutates = True
@@ -158,16 +159,52 @@ class Schedule(Tool):
 class DispatchUnit(Tool):
     name = "dispatch_unit"
     description = (
-        "Send a read-only support unit to investigate something (search a codebase, read many files, "
-        "summarize) and report back. It runs on a cheaper model with its own context, so your context "
-        "stays small. It cannot modify anything."
+        "Send a support unit to investigate something (search a codebase, read many files, summarize) "
+        "and report back. It runs on a cheaper model with its own context, so your context stays small. "
+        "Leave `unit` empty for the default read-only unit, or name a specialist from your system prompt."
     )
 
     class Input(BaseModel):
         task: str = Field(description="complete, self-contained instructions; the unit sees nothing else")
+        unit: str = Field("", description="specialist unit name, or empty for the default support unit")
+
+    def arg(self, inp):
+        return (f"[{inp.unit}] " if inp.unit else "") + inp.task
 
     def run(self, inp, ctx):
-        return ctx.agent.spawn_subagent(inp.task)
+        return ctx.agent.spawn_subagent(inp.task, inp.unit)
+
+
+class SubmitPlan(Tool):
+    name = "submit_plan"
+    description = (
+        "Plan mode only. Investigate with read-only tools first, then submit your plan. The operator "
+        "reads it and approves or declines with a note. Approved: the mode switches and you carry the "
+        "plan out. Declined: revise the plan from the note and submit again. Nothing can change before this."
+    )
+    mutates = True
+    parallel_safe = False
+    always_ask = True
+
+    class Input(BaseModel):
+        summary: str = Field(description="markdown: the approach, which files change and how, how you'll verify, risks")
+        steps: list[str] = Field(description="the checklist you will follow, one short line per step")
+
+    def arg(self, inp):
+        return inp.summary.strip().splitlines()[0][:120] if inp.summary.strip() else "plan"
+
+    def risk(self, inp, ctx):
+        return Risk("low", ["nothing changes until you approve"])
+
+    def preview(self, inp, ctx):
+        steps = "\n".join(f"{i}. {s}" for i, s in enumerate(inp.steps, 1))
+        return f"{inp.summary.strip()}\n\n**Steps**\n{steps}"
+
+    def run(self, inp, ctx):
+        return ctx.agent.plan_approved(inp.steps)
+
+    def dry(self, inp, ctx):
+        return self.run(inp, ctx)
 
 
 class AskOperator(Tool):
@@ -181,4 +218,5 @@ class AskOperator(Tool):
         return ctx.agent.ask(inp.question)
 
 
-TOOLS = [Remember(), Recall(), Forget(), UseSkill(), ProposeSkill(), Todo(), Schedule(), DispatchUnit(), AskOperator()]
+TOOLS = [Remember(), Recall(), Forget(), UseSkill(), ProposeSkill(), Todo(), Schedule(), DispatchUnit(), SubmitPlan(),
+         AskOperator()]
